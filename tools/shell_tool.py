@@ -11,19 +11,14 @@ def run_shell_command(
     cwd: str = None,
     timeout: int = 60,
 ) -> str:
-    """Execute a shell command and return its stdout, stderr, and exit code.
-
-    Use this for running tests, installing packages, running linters/type
-    checkers, or any other one-shot CLI operation. Do NOT use this for
-    long-running commands like model training — it blocks until the command
-    finishes or times out. Use launch_background_process for those instead.
+    """Run a shell command; returns stdout/stderr/exit code. For one-shot
+    CLI ops (tests, installs, linters). NOT for long-running commands — use
+    launch_background_process instead.
 
     Args:
-        command: The shell command to execute.
-        cwd: Working directory to run the command in. Defaults to the
-            current directory.
-        timeout: Max seconds to wait before killing the process and
-            returning an error. Defaults to 60.
+        command: Shell command to run.
+        cwd: Working directory. Default current dir.
+        timeout: Max seconds before killing it. Default 60.
     """
 
     try:

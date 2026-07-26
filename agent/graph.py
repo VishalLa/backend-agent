@@ -1,8 +1,10 @@
+import json
 import re
 import time
+import uuid
 from typing import Any, Literal, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import InMemorySaver
@@ -14,7 +16,7 @@ from .llm import get_llm_with_tools
 from .logging_utils import log_event, safe_args
 from .schemas import AgentState, ConfirmationRequest, ToolCallLog
 
-MAX_TOOL_OUTPUT_CHARS = 3000
+MAX_TOOL_OUTPUT_CHARS = 1200
 
 RETRYABLE_ERROR_MARKERS = (
     "rate limit",
@@ -36,6 +38,14 @@ CONTEXT_LENGTH_MARKERS = (
     "reduce your message size",
     "413",
 )
+
+TOOL_NAME_ERROR_MARKERS = (
+    "not in request.tools",
+    "tool_use_failed",
+    "which was not in request",
+)
+MAX_TOOL_HALLUCINATION_RETRIES = 2
+MAX_EMPTY_RESPONSE_RETRIES = 2
 
 _RETRY_AFTER_RE = re.compile(r"try again in\s+([\d.]+)\s*s", re.IGNORECASE)
 MAX_RATE_LIMIT_WAIT_SECONDS = 90.0
@@ -60,6 +70,56 @@ def _thread_id(run_config: Optional[dict]) -> str:
         return "unknown"
 
 
+def _find_json_object(text: str) -> Optional[str]:
+    """Find the first balanced {...} substring in text (brace-counting, so
+    it handles nested braces correctly, unlike a naive regex)."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _extract_leaked_tool_call(text: str, valid_tool_names: set) -> Optional[dict]:
+    """Some models (especially smaller local ones via Ollama) occasionally
+    write out a tool call as plain text content — e.g.
+    '{"name": "read_file", "arguments": {"path": "x.py"}}' — instead of
+    using the model's real structured tool-calling mechanism. Left alone,
+    this looks like empty tool_calls + a final text answer, so the graph
+    ends the run with that JSON string as the "answer" and nothing actually
+    happens. Detect that shape and repair it into a real tool call so
+    tools_node can execute it normally.
+
+    Returns a langchain-style tool_call dict ({"name", "args", "id"}) if a
+    valid one was found, else None (in which case the text is left as a
+    normal — if odd-looking — final answer)."""
+    if "{" not in text or '"name"' not in text:
+        return None
+    blob = _find_json_object(text)
+    if not blob:
+        return None
+    try:
+        parsed = json.loads(blob)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name")
+    if not isinstance(name, str) or name not in valid_tool_names:
+        return None
+    args = parsed.get("arguments", parsed.get("args", parsed.get("parameters", {})))
+    if not isinstance(args, dict):
+        args = {}
+    return {"name": name, "args": args, "id": f"repaired-{uuid.uuid4().hex[:8]}"}
+
+
 def _identify_provider(response: Any, config: AgentConfig) -> str:
     """Best-effort guess at which tier of the Groq -> OpenRouter -> Ollama
     fallback chain actually answered — with_fallbacks() doesn't tag this
@@ -77,29 +137,17 @@ def _identify_provider(response: Any, config: AgentConfig) -> str:
 
 
 SYSTEM_PROMPT = (
-    "You are a local coding agent for Python backend (Flask/FastAPI) and ML/data work. "
-    "Use the available tools to inspect, edit, and verify code. Prefer targeted edit_file "
-    "patches over rewriting whole files. Run tests/lint/type-checks after edits when those "
-    "tools are available. Shell commands, background job launches, deletions, git pushes, "
-    "and overwriting existing files require human confirmation. If one is declined, do not "
-    "immediately retry the same call — explain the block to the user and propose a safer "
-    "alternative or ask how to proceed.\n\n"
-    "IMPORTANT — large files: the model backing this agent has a limited tokens-per-request "
-    "budget. Never generate a large file (roughly 150+ lines) in a single write_file call. "
-    "Instead: call write_file with the first chunk (e.g. imports, first class/function or "
-    "section, ~100-150 lines), then call append_file one or more times to add the rest in "
-    "similarly sized chunks. Plan the file's structure first, then write it section by "
-    "section across multiple tool calls rather than one large completion.\n\n"
-    "IMPORTANT — tools: only ever call a tool using its exact name from the tools provided "
-    "for this request. Never invent, guess, or reuse a tool name from a different framework "
-    "or convention that wasn't given to you.\n\n"
-    "IMPORTANT — reading many files (e.g. summarizing/mapping a whole directory or building a "
-    "diagram across many models): do NOT read every file in full up front. Use ripgrep_search or "
-    "list_dir first to scope down to what's relevant, then read_file with an explicit start_line/"
-    "end_line range (a few hundred lines at a time) rather than the whole file. Process files one "
-    "or a few at a time and summarize what you learned in your own words before moving on, instead "
-    "of keeping every full file's content in play — this avoids hitting token-per-minute/context "
-    "limits on long exploratory tasks."
+    "You are a local coding agent for Python backend/ML work. Use tools to inspect, edit, "
+    "verify code. Prefer targeted edit_file patches over rewriting whole files. Run tests/"
+    "lint after edits when available. Shell, background jobs, deletions, git push, and "
+    "file overwrite need human confirmation — if declined, don't retry; explain and propose "
+    "an alternative.\n"
+    "Large files: never write 150+ lines in one write_file call — write_file for the first "
+    "chunk, then append_file for the rest in similar-sized chunks.\n"
+    "Only call tools by their exact given names, never invented ones.\n"
+    "Scanning many files (e.g. mapping a whole directory): use ripgrep_search/list_dir to "
+    "scope down first, then read_file in ranges, one file at a time — don't read everything "
+    "in full, it will exceed the per-request token budget."
 )
 
 
@@ -112,8 +160,8 @@ def _truncate(text: object, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
 
 MAX_TOOL_CALL_ARG_CHARS = 300
 
-RECENT_TOOL_RESULTS_KEPT_FULL = 4
-COLLAPSED_TOOL_RESULT_CHARS = 300
+RECENT_TOOL_RESULTS_KEPT_FULL = 2
+COLLAPSED_TOOL_RESULT_CHARS = 150
 
 
 def _collapse_old_tool_results(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -220,10 +268,47 @@ def build_graph(agent_config: AgentConfig, tools: list):
 
         last_error: Optional[Exception] = None
         rate_limit_retries_left = 3
+        tool_hallucination_retries_left = MAX_TOOL_HALLUCINATION_RETRIES
+        empty_response_retries_left = MAX_EMPTY_RESPONSE_RETRIES
         attempt = 0
         while True:
             try:
                 response = llm_with_tools.invoke(model_input)
+                has_tool_calls = bool(getattr(response, "tool_calls", None))
+                content_text = response.content if isinstance(response.content, str) else str(response.content or "")
+
+                if not has_tool_calls and content_text.strip():
+                    leaked = _extract_leaked_tool_call(content_text, set(tools_by_name))
+                    if leaked:
+                        log_event(
+                            agent_config.log_file, "llm_tool_call_leaked_as_text",
+                            thread_id=thread_id, tool_name=leaked["name"],
+                        )
+                        response = AIMessage(
+                            content="",
+                            tool_calls=[leaked],
+                            response_metadata=getattr(response, "response_metadata", {}) or {},
+                        )
+                        has_tool_calls = True
+
+                if not has_tool_calls and not content_text.strip():
+                    log_event(agent_config.log_file, "llm_empty_response", thread_id=thread_id)
+                    if empty_response_retries_left > 0:
+                        empty_response_retries_left -= 1
+                        model_input = model_input + [
+                            HumanMessage(
+                                content=(
+                                    "SYSTEM: your last response was empty — no tool call and no answer "
+                                    "text. Continue the task now: call the next tool you need (e.g. "
+                                    "write_file if you were asked to save output to a file), or if the "
+                                    "task is genuinely finished, write your final answer as plain text."
+                                )
+                            )
+                        ]
+                        continue
+                    # retries exhausted — return the empty response rather than looping forever;
+                    # run_end will show tool_call_count/iterations so this is at least diagnosable.
+
                 log_event(
                     agent_config.log_file, "llm_call", thread_id=thread_id,
                     provider=_identify_provider(response, agent_config),
@@ -251,6 +336,27 @@ def build_graph(agent_config: AgentConfig, tools: list):
                         "status": "error",
                         "error": str(e),
                     }
+
+                if any(marker in msg for marker in TOOL_NAME_ERROR_MARKERS):
+                    log_event(
+                        agent_config.log_file, "llm_tool_hallucination", thread_id=thread_id, error=str(e),
+                    )
+                    if tool_hallucination_retries_left > 0:
+                        tool_hallucination_retries_left -= 1
+                        valid_names = ", ".join(sorted(tools_by_name))
+                        model_input = model_input + [
+                            HumanMessage(
+                                content=(
+                                    "SYSTEM: your last tool call used a tool name that doesn't exist "
+                                    f"in this toolset. The ONLY valid tool names are exactly: "
+                                    f"{valid_names}. Call one of these exactly (spelled and cased as "
+                                    "given, no prefixes/namespaces), or reply with plain text if you "
+                                    "don't actually need a tool."
+                                )
+                            )
+                        ]
+                        continue
+                    # retries exhausted — fall through to the generic failure path below
 
                 retry_after = _parse_retry_after(msg)
                 is_rate_limit = retry_after is not None or "rate_limit" in msg or "rate limit" in msg

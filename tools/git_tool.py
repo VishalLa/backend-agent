@@ -14,10 +14,10 @@ def _run_git(args: list[str], cwd: str = None) -> str:
 
 @tool
 def git_status(cwd: str = None) -> str:
-    """Show the working tree status: staged, unstaged, and untracked files.
+    """Show staged, unstaged, and untracked files.
 
     Args:
-        cwd: Repository directory. Defaults to the current directory.
+        cwd: Repo directory. Default current dir.
     """
     return _run_git(["status", "--short", "--branch"], cwd)
 
@@ -28,12 +28,12 @@ def git_diff(
     path: str = None, 
     cwd: str = None
 ) -> str:
-    """Show changes between the working tree, index, and HEAD.
+    """Show diff between working tree/index/HEAD.
 
     Args:
-        staged: If True, show staged (index) changes instead of unstaged.
-        path: Optional file or directory to limit the diff to.
-        cwd: Repository directory.
+        staged: Show staged changes instead of unstaged.
+        path: Optional file/dir to limit diff to.
+        cwd: Repo directory.
     """
     args = ["diff"]
     if staged:
@@ -45,11 +45,11 @@ def git_diff(
 
 @tool
 def git_log(n: int = 10, cwd: str = None) -> str:
-    """Show recent commit history, one line per commit.
+    """Show recent commits, one line each.
 
     Args:
-        n: Number of commits to show. Defaults to 10.
-        cwd: Repository directory.
+        n: Number of commits. Default 10.
+        cwd: Repo directory.
     """
 
     return _run_git(["log", f"-{n}", "--oneline", "--decorate"], cwd)
@@ -57,14 +57,11 @@ def git_log(n: int = 10, cwd: str = None) -> str:
 
 @tool
 def git_branch(create: str = None, cwd: str = None) -> str:
-    """List branches with tracking info, or create and switch to a new one.
+    """List branches, or create+switch to a new one if create= is given.
 
     Args:
-        create: If given (e.g. "agent/task-name"), create and switch to a
-            new branch with this name instead of listing branches. Use a
-            dedicated branch per agent session so changes can be reviewed
-            before merging to main.
-        cwd: Repository directory.
+        create: New branch name to create and switch to (e.g. "agent/task").
+        cwd: Repo directory.
     """
 
     if create:
@@ -74,11 +71,11 @@ def git_branch(create: str = None, cwd: str = None) -> str:
 
 @tool
 def git_checkout(ref: str, cwd: str = None) -> str:
-    """Switch branches or restore working tree files to a given ref.
+    """Switch branches or restore files to a given ref.
 
     Args:
-        ref: Branch name, commit hash, or ref to check out.
-        cwd: Repository directory.
+        ref: Branch name, commit hash, or ref.
+        cwd: Repo directory.
     """
 
     return _run_git(["checkout", ref], cwd)
@@ -86,13 +83,12 @@ def git_checkout(ref: str, cwd: str = None) -> str:
 
 @tool
 def git_commit(message: str, add_all: bool = True, cwd: str = None) -> str:
-    """Stage and commit changes. Use this to create a checkpoint before or
-    after making edits, so any change is reversible with git reset/revert.
+    """Stage and commit changes (checkpoint, reversible via git reset/revert).
 
     Args:
         message: Commit message.
-        add_all: If True (default), stage all changes (git add -A) before committing.
-        cwd: Repository directory.
+        add_all: Stage all changes first (git add -A). Default True.
+        cwd: Repo directory.
     """
 
     if add_all:
@@ -109,16 +105,14 @@ def git_push(
     confirm: bool = False, 
     cwd: str = None
 ) -> str:
-    """Push commits to a remote. This is hard to undo cleanly, so it is on
-    the confirm-before-run list: it REQUIRES confirm=True to actually run.
-    Never set confirm=True on your own initiative — only after the user has
-    explicitly agreed to the push.
+    """Push to a remote. REQUIRES confirm=True (only after the user
+    explicitly agrees) — hard to undo cleanly.
 
     Args:
-        remote: Remote name. Defaults to "origin".
-        branch: Branch to push. Defaults to the current branch.
-        confirm: Must be explicitly True to actually push. Defaults to False.
-        cwd: Repository directory.
+        remote: Remote name. Default "origin".
+        branch: Branch to push. Default current branch.
+        confirm: Must be True to actually push. Default False.
+        cwd: Repo directory.
     """
     
     if not confirm:

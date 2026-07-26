@@ -22,7 +22,9 @@ def log_event(log_path: str, event_type: str, **fields: Any) -> None:
     Event types currently emitted by the agent:
       run_start, run_end, run_failed        (runner.py)
       llm_call, llm_rate_limited_wait,
-      llm_call_failed                       (graph.py — includes which
+      llm_call_failed, llm_tool_hallucination,
+      llm_tool_call_leaked_as_text,
+      llm_empty_response                    (graph.py — includes which
                                               provider tier answered, when
                                               it can be determined)
       tool_call, tool_call_blocked          (graph.py)

@@ -11,7 +11,7 @@ except ImportError:
     pass
 
 DEFAULT_MODEL = "openai/gpt-oss-120b"
-DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:32b"
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:14b"
 
 
 class AgentConfig(BaseModel):
@@ -42,7 +42,7 @@ class AgentConfig(BaseModel):
 
     temperature: float = 0.1
     max_tokens: int = 4096
-    max_iterations: int = 7
+    max_iterations: int = 20
     request_timeout: float = 60.0
     max_retries: int = 3
     retry_backoff_seconds: float = 2.0
@@ -131,7 +131,7 @@ class AgentConfig(BaseModel):
             provider_mode=os.environ.get("AGENT_PROVIDER_MODE", "api"),
             temperature=float(os.environ.get("GROQ_TEMPERATURE", 0.1)),
             max_tokens=int(os.environ.get("GROQ_MAX_TOKENS", 4096)),
-            max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", 7)),
+            max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", 20)),
             request_timeout=float(os.environ.get("GROQ_REQUEST_TIMEOUT", 60.0)),
             max_retries=int(os.environ.get("GROQ_MAX_RETRIES", 3)),
         )

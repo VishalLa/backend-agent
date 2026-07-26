@@ -70,19 +70,14 @@ def _collect_outputs(kc, timeout: int) -> dict:
 
 @tool
 def execute_code(code: str, project_id: str = "default", timeout: int = 120) -> str:
-    """Execute Python code in a persistent Jupyter kernel. State (variables,
-    imports, loaded dataframes/models) PERSISTS across calls that share the
-    same project_id — do not re-import libraries or reload large datasets
-    that were already loaded in a previous call. Use this for ML/data
-    analysis work instead of one-shot shell `python -c` calls. For
-    long-running training, use launch_background_process instead so this
-    call doesn't block on it.
+    """Execute Python in a persistent Jupyter kernel; state persists across
+    calls sharing the same project_id (don't re-import/reload). Use
+    launch_background_process for long-running training instead.
 
     Args:
-        code: Python code to execute in the kernel.
-        project_id: Identifier for which persistent kernel to use. Use a
-            consistent id per project so state is shared correctly across calls.
-        timeout: Max seconds to wait for execution to finish.
+        code: Python code to run.
+        project_id: Kernel identifier; keep consistent per project.
+        timeout: Max seconds to wait.
     """
     km = _get_kernel(project_id)
     kc = km.client()
@@ -130,13 +125,11 @@ def execute_code(code: str, project_id: str = "default", timeout: int = 120) -> 
 
 @tool
 def restart_kernel(project_id: str = "default") -> str:
-    """Restart the persistent Python kernel for a project, clearing all
-    state (variables, imports, loaded models/data). Use this if the kernel
-    gets into a bad state (e.g. GPU OOM, hung process) or a clean
-    environment is needed.
+    """Restart a project's kernel, clearing all state. Use if it's in a
+    bad state (GPU OOM, hung) or you need a clean environment.
 
     Args:
-        project_id: Identifier for which kernel to restart.
+        project_id: Kernel identifier to restart.
     """
     if project_id in _kernels:
         _kernels[project_id].shutdown_kernel(now=True)

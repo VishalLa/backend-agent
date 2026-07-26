@@ -8,20 +8,17 @@ try:
     web_search = DuckDuckGoSearchRun()
     web_search.name = "web_search"
     web_search.description = (
-        "Search the web for current library docs, error message explanations, "
-        "or API references. Prefer this over relying on training data for "
-        "fast-moving libraries (transformers, langchain, fastapi, etc.) or "
-        "unfamiliar errors. Requires the `ddgs` package."
+        "Search the web for current docs, errors, or API references. "
+        "Prefer over training data for fast-moving libraries. Requires `ddgs`."
     )
 except ImportError:
 
     @tool
     def web_search(query: str) -> str:
-        """Search the web. NOT CONFIGURED: install `ddgs` and
-        `langchain-community`, or swap this for a Tavily/Serper-backed tool.
+        """Search the web. NOT CONFIGURED: install `ddgs` + `langchain-community`.
 
         Args:
-            query: The search query.
+            query: Search query.
         """
         return "ERROR: web_search is not configured. Install ddgs + langchain-community."
 
@@ -34,16 +31,15 @@ def ripgrep_search(
     case_insensitive: bool = False,
     max_results: int = 100,
 ) -> str:
-    """Fast text/regex search across a codebase using ripgrep. Prefer this
-    over reading whole files when looking for a symbol, function, import, or
-    string occurrence.
+    """Fast regex/text search via ripgrep. Prefer over reading whole files
+    when looking for a symbol/function/import/string.
 
     Args:
-        pattern: Regex or plain-text pattern to search for.
-        path: File or directory to search. Defaults to the current directory.
-        file_type: Optional ripgrep file-type filter (e.g. "py", "js").
-        case_insensitive: If True, ignore case.
-        max_results: Cap on the number of matching lines returned.
+        pattern: Regex or plain-text pattern.
+        path: File/dir to search. Default current dir.
+        file_type: Optional file-type filter (e.g. "py").
+        case_insensitive: Ignore case.
+        max_results: Cap on matching lines returned.
     """
     cmd = ["rg", "--line-number", "--no-heading"]
     if case_insensitive:

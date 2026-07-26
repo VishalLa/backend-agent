@@ -32,20 +32,13 @@ def read_file(
     start_line: Optional[int] = None,
     end_line: Optional[int] = None,
 ) -> str:
-    """Read a file's contents with 1-indexed line numbers, for easy reference
-    when constructing later edit_file calls.
-
-    If start_line/end_line are omitted and the file has more than
-    DEFAULT_MAX_READ_LINES (300) lines, only the first 300 lines are
-    returned along with a note of how many more lines exist — pass an
-    explicit start_line/end_line to page through the rest instead of
-    reading (and re-reading) the whole file at once. This keeps large-file
-    reads from blowing a single request's token budget.
+    """Read a file with line numbers. If no range given and file >300 lines,
+    returns first 300 lines only + how many more exist.
 
     Args:
-        path: Path to the file to read.
-        start_line: Optional 1-indexed line to start from (inclusive).
-        end_line: Optional 1-indexed line to end at (inclusive).
+        path: File path.
+        start_line: 1-indexed start (inclusive).
+        end_line: 1-indexed end (inclusive).
     """
 
     try:
@@ -65,7 +58,14 @@ def read_file(
         )
     else:
         start = max(0, (start_line - 1) if start_line else 0)
-        end = min(total, end_line if end_line else total)
+        requested_end = min(total, end_line if end_line else total)
+        end = min(requested_end, start + DEFAULT_MAX_READ_LINES)
+        if end < requested_end:
+            capped_note = (
+                f"\n... [range capped at {DEFAULT_MAX_READ_LINES} lines; "
+                f"showing lines {start + 1}-{end} of the requested {start + 1}-{requested_end}; "
+                f"call again with start_line={end + 1} for more]"
+            )
 
     numbered = [f"{i + 1}\t{lines[i]}" for i in range(start, end)]
     body = "".join(numbered) if numbered else "(empty range)"
@@ -78,21 +78,13 @@ def write_file(
     content: str,
     overwrite: bool = False,
 ) -> str:
-    """Create a new file with the given content. Fails if the file already
-    exists unless overwrite=True is explicitly passed — use edit_file for
-    targeted changes to existing files instead of clobbering them.
-
-    NOTE: calling this with overwrite=True on an existing file requires
-    human confirmation (gated at the graph level, see
-    agent.confirmation.needs_confirmation) — it will pause and prompt before
-    running, same as a delete. Plain creation of a new file (overwrite=False,
-    the default) is never gated.
+    """Create a new file. Fails if it exists unless overwrite=True (that
+    requires human confirmation). Use edit_file for targeted changes instead.
 
     Args:
-        path: Path to the file to create.
-        content: Full text content to write.
-        overwrite: If True, allow overwriting an existing file. Requires
-            human confirmation. Defaults to False.
+        path: File path to create.
+        content: Full content to write.
+        overwrite: Overwrite existing file (needs confirmation). Default False.
     """
 
     p = Path(path)
@@ -113,22 +105,13 @@ def append_file(
     content: str,
     create_if_missing: bool = True,
 ) -> str:
-    """Append content to the end of an existing file, creating it first if
-    it doesn't exist and create_if_missing=True.
-
-    Use this to build large files (roughly 150+ lines) across several
-    smaller tool calls instead of generating the whole thing in one
-    write_file completion — a single huge completion is much more likely to
-    hit a model's per-request token cap (this is especially tight on
-    low-tier free API plans). Typical pattern: write_file for the first
-    chunk (imports, first class/section), then one or more append_file
-    calls for the rest.
+    """Append to a file, creating it first if missing (create_if_missing=True).
+    Use with write_file to build large files in chunks instead of one big write.
 
     Args:
-        path: Path to the file to append to.
-        content: Text to append at the end of the file.
-        create_if_missing: If True (default) and the file doesn't exist yet,
-            create it with this content instead of erroring.
+        path: File path to append to.
+        content: Text to append.
+        create_if_missing: Create the file if it doesn't exist. Default True.
     """
     p = Path(path)
     if not p.exists():
@@ -155,15 +138,13 @@ def edit_file(
     old_str: str,
     new_str: str,
 ) -> str:
-    """Replace an exact, unique string in a file with a new string
-    (patch-based edit). old_str must match the file content exactly,
-    including whitespace, and must appear exactly once — this avoids
-    clobbering unrelated code and keeps diffs reviewable.
+    """Replace an exact, unique string in a file (must match exactly,
+    including whitespace, and appear exactly once).
 
     Args:
-        path: Path to the file to edit.
-        old_str: Exact existing text to replace. Must be unique in the file.
-        new_str: Text to replace it with.
+        path: File path to edit.
+        old_str: Exact text to replace (must be unique in the file).
+        new_str: Replacement text.
     """
 
     try:
@@ -185,13 +166,12 @@ def edit_file(
 
 @tool
 def list_dir(path: str = ".", depth: int = 2) -> str:
-    """List a directory tree up to a given depth, respecting .gitignore
-    rules and skipping common noise directories (.git, __pycache__, venv,
-    node_modules, etc).
+    """List a directory tree, respecting .gitignore and skipping noise dirs
+    (.git, __pycache__, venv, node_modules, etc).
 
     Args:
-        path: Root directory to list. Defaults to the current directory.
-        depth: Max depth to recurse. Defaults to 2.
+        path: Root directory. Default ".".
+        depth: Max recursion depth. Default 2.
     """
     root = Path(path)
     if not root.exists():
@@ -221,3 +201,4 @@ def list_dir(path: str = ".", depth: int = 2) -> str:
 
     _walk(root, "", 1)
     return "\n".join(lines) if lines else "(empty)"
+    
