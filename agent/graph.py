@@ -128,8 +128,7 @@ def build_graph(config: AgentConfig, tools: list):
     # ---- nodes -------------------------------------------------------
 
     def agent_node(state: AgentState) -> dict:
-        # Loop guard: stop calling the model once we've hit the cap, instead
-        # of looping forever on a task the model can't finish.
+        # Loop guard: stop calling the model once we've hit the cap
         if state.iterations >= config.max_iterations:
             return {
                 "messages": [
@@ -155,7 +154,7 @@ def build_graph(config: AgentConfig, tools: list):
             try:
                 response = llm_with_tools.invoke(model_input)
                 return {"messages": [response], "iterations": state.iterations + 1}
-            except Exception as e:  # noqa: BLE001 - Groq/httpx errors are heterogeneous by design
+            except Exception as e:
                 last_error = e
                 msg = str(e).lower()
                 if any(marker in msg for marker in CONTEXT_LENGTH_MARKERS):
@@ -191,7 +190,7 @@ def build_graph(config: AgentConfig, tools: list):
                 attempt += 1
 
         return {
-            "messages": [AIMessage(content=f"I hit an error calling the model and couldn't recover: {last_error}")],
+            "messages": [AIMessage(content=f"Critical API Error: Both primary (Groq) and fallback (OpenRouter) models failed to respond or hit unrecoverable limits. Details: {last_error}")],
             "iterations": state.iterations + 1,
             "status": "error",
             "error": str(last_error),
@@ -253,15 +252,11 @@ def build_graph(config: AgentConfig, tools: list):
                     raw_output = tool.invoke(args)
                     output = _truncate(raw_output)
                     success = not (isinstance(raw_output, str) and raw_output.startswith(("ERROR", "BLOCKED")))
-                except Exception as e:  # noqa: BLE001 - bad args, tool bugs, etc. must not crash the graph
+                except Exception as e:
                     output = f"ERROR: tool '{name}' raised an exception: {e}"
                     success = False
 
             new_messages.append(ToolMessage(content=output, tool_call_id=call_id, name=name))
-            # Reaching this point means the call either never needed confirmation,
-            # or it did and was approved (declined calls got a BLOCKED ToolMessage
-            # in confirm_node and are filtered out by already_answered above) — so
-            # `confirmed` is always True here.
             logs.append(
                 ToolCallLog(
                     call_id=call_id, tool_name=name, args=args, result=output, confirmed=True, success=success

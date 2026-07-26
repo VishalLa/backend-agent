@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 
@@ -15,8 +16,16 @@ DEFAULT_MODEL = "openai/gpt-oss-120b"
 class AgentConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    # default use groq
     groq_api_key: SecretStr
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     model_name: str = DEFAULT_MODEL
+
+    # fall back in case of all request are exhausted 
+    openrouter_api_key: SecretStr = SecretStr("")
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    fallback_model_name: str = DEFAULT_MODEL + ":free"
+
     temperature: float = 0.1
     max_tokens: int = 4096
     max_iterations: int = 7
@@ -31,7 +40,7 @@ class AgentConfig(BaseModel):
             raise ValueError("GROQ_API_KEY is empty. Set it in your environment or a .env file.")
         return v
 
-    @field_validator("model_name")
+    @field_validator("model_name", "fallback_model_name")
     @classmethod
     def _model_not_empty(cls, v: str) -> str:
         if not v.strip():
@@ -64,18 +73,22 @@ class AgentConfig(BaseModel):
         """Build config from environment variables / .env. Raises a clear
         ValueError immediately if GROQ_API_KEY is missing, rather than
         letting a cryptic auth error surface later mid-conversation."""
-        api_key = os.environ.get("GROQ_API_KEY", "")
-        if not api_key:
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        if not groq_key:
             raise ValueError(
                 "GROQ_API_KEY not found in environment. Set it in your shell "
                 "or a .env file (see .env.example)."
             )
+            
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+        
         return cls(
-            groq_api_key=SecretStr(api_key),
+            groq_api_key=SecretStr(groq_key),
+            openrouter_api_key=SecretStr(openrouter_key),
             model_name=os.environ.get("GROQ_MODEL", DEFAULT_MODEL),
             temperature=float(os.environ.get("GROQ_TEMPERATURE", 0.1)),
             max_tokens=int(os.environ.get("GROQ_MAX_TOKENS", 4096)),
-            max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", 15)),
+            max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", 7)),
             request_timeout=float(os.environ.get("GROQ_REQUEST_TIMEOUT", 60.0)),
             max_retries=int(os.environ.get("GROQ_MAX_RETRIES", 3)),
         )

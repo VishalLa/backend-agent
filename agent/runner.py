@@ -83,6 +83,8 @@ def run_agent(
     step_input: Any = {"messages": [HumanMessage(content=prompt)]}
 
     try:
+        # Wrapped the core graph invocation in a try/except block to catch total failures
+        # if both APIs are unreachable and cause the graph to raise an unhandled exception.
         while True:
             graph.invoke(step_input, config=thread_cfg)
             snapshot = graph.get_state(thread_cfg)
@@ -104,8 +106,15 @@ def run_agent(
                 decision = ConfirmationDecision(approved=False, reason=f"confirmation handler failed: {e}")
 
             step_input = Command(resume=decision.model_dump())
-    except Exception as e:  # noqa: BLE001 - last-resort net around the whole graph run
-        return AgentResult(output="", status="error", iterations=0, thread_id=thread_id, error=f"agent run failed: {e}")
+            
+    except Exception as e:  # noqa: BLE001 - Catch catastrophic dual-API failures or internal graph crashes
+        return AgentResult(
+            output="Agent crashed during execution. Both providers (Groq and OpenRouter) might be down.",
+            status="error",
+            iterations=0,
+            thread_id=thread_id,
+            error=f"Graph execution failed. Details: {str(e)}"
+        )
 
     final = graph.get_state(thread_cfg).values
     messages = _field(final, "messages", []) or []
@@ -127,3 +136,4 @@ def run_agent(
         thread_id=thread_id,
         error=_field(final, "error", None),
     )
+    
