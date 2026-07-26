@@ -407,29 +407,36 @@ def build_graph(agent_config: AgentConfig, tools: list):
         last_ai = _last_ai_message_with_tool_calls(list(state.messages))
         tool_calls = last_ai.tool_calls if last_ai else []
 
-        new_messages: list[BaseMessage] = []
+        pending: list[ConfirmationRequest] = []
         for tc in tool_calls:
             args = tc.get("args", {}) or {}
-            if not needs_confirmation(tc["name"], args, agent_config.confirm_all_tools):
-                continue
-            request = ConfirmationRequest(
-                tool_name=tc["name"],
-                tool_args=args,
-                call_id=tc["id"],
-            )
+            if needs_confirmation(tc["name"], args, agent_config.confirm_all_tools):
+                pending.append(
+                    ConfirmationRequest(tool_name=tc["name"], tool_args=args, call_id=tc["id"])
+                )
 
-            raw = interrupt(request.model_dump())
-            approved = bool(isinstance(raw, dict) and raw.get("approved"))
+        if not pending:
+            return {}
+
+        raw = interrupt([r.model_dump() for r in pending])
+        decisions = raw if isinstance(raw, dict) else {}
+
+        new_messages: list[BaseMessage] = []
+        for req in pending:
+            decision = decisions.get(req.call_id) or {}
+            approved = bool(isinstance(decision, dict) and decision.get("approved"))
             if not approved:
-                reason = (raw.get("reason") if isinstance(raw, dict) else None) or "declined by the user"
+                reason = (decision.get("reason") if isinstance(decision, dict) else None) or (
+                    "declined by the user"
+                )
                 new_messages.append(
                     ToolMessage(
                         content=(
                             f"BLOCKED: {reason}. Do not retry this exact command — "
                             "explain the block to the user or propose a safer alternative."
                         ),
-                        tool_call_id=tc["id"],
-                        name=tc["name"],
+                        tool_call_id=req.call_id,
+                        name=req.tool_name,
                     )
                 )
         return {"messages": new_messages} if new_messages else {}
@@ -511,4 +518,3 @@ def build_graph(agent_config: AgentConfig, tools: list):
 
     checkpointer = InMemorySaver()
     return builder.compile(checkpointer=checkpointer)
-    

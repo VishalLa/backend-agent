@@ -111,22 +111,28 @@ def run_agent(
                 # but bail cleanly instead of looping forever.
                 break
 
-            request = ConfirmationRequest.model_validate(snapshot.tasks[0].interrupts[0].value)
-            try:
-                decision = confirm_handler(request)
-            except (KeyboardInterrupt, EOFError):
-                decision = ConfirmationDecision(approved=False, reason="cancelled — no confirmation given")
-            except Exception as e:  # noqa: BLE001 - a broken custom confirm_handler shouldn't crash the run
-                decision = ConfirmationDecision(approved=False, reason=f"confirmation handler failed: {e}")
 
-            # Logged here (once per real decision) rather than inside
-            # graph.py's confirm_node, which can re-execute several times
-            # per decision due to LangGraph's interrupt()-replay semantics.
-            log_event(
-                config.log_file, "confirmation_decision", thread_id=thread_id,
-                tool_name=request.tool_name, approved=decision.approved, reason=decision.reason,
-            )
-            step_input = Command(resume=decision.model_dump())
+            raw_requests = snapshot.tasks[0].interrupts[0].value
+            if not isinstance(raw_requests, list):
+                raw_requests = [raw_requests]
+            requests = [ConfirmationRequest.model_validate(r) for r in raw_requests]
+
+            decisions: dict[str, dict] = {}
+            for request in requests:
+                try:
+                    decision = confirm_handler(request)
+                except (KeyboardInterrupt, EOFError):
+                    decision = ConfirmationDecision(approved=False, reason="cancelled — no confirmation given")
+                except Exception as e:  # noqa: BLE001 - a broken custom confirm_handler shouldn't crash the run
+                    decision = ConfirmationDecision(approved=False, reason=f"confirmation handler failed: {e}")
+
+                log_event(
+                    config.log_file, "confirmation_decision", thread_id=thread_id,
+                    tool_name=request.tool_name, approved=decision.approved, reason=decision.reason,
+                )
+                decisions[request.call_id] = decision.model_dump()
+
+            step_input = Command(resume=decisions)
 
     except Exception as e:  # noqa: BLE001 - last-resort net around the whole graph run
         log_event(config.log_file, "run_failed", thread_id=thread_id, reason="graph_execution_crashed", error=str(e))
@@ -166,3 +172,4 @@ def run_agent(
         iterations=result.iterations, tool_call_count=len(result.tool_calls), error=result.error,
     )
     return result
+

@@ -1,428 +1,256 @@
-# Local Python Coding Agent — Requirements & Tools
+# Local Coding Agent
 
-Personal-use coding agent for Python backend development (Flask/FastAPI) and
-ML/DL/data analysis work. Runs locally, single user, no enterprise
-orchestration needed.
+An extensible, local-first coding assistant built with **LangGraph**, **LangChain**, and **Pydantic**. This agent is designed for Python backend, ML engineering, and general software development tasks. It features a multi-tiered LLM fallback system, interactive human-in-the-loop confirmation gates for destructive operations, persistent Jupyter kernel state, and detailed JSON-lines event logging.
 
 ---
 
-## 1. Architecture Overview
+## 📌 Project Summary
+
+The **Local Coding Agent** acts as an automated coding assistant that inspects, edits, tests, and verifies code within your project environment. Instead of rewriting whole files, it prefers targeted context editing (`edit_file`) and chunked file creation (`append_file`). 
+
+### Core Capabilities
+* **Multi-Tier Model Fallback:** Tries **Groq** $\rightarrow$ **OpenRouter** $\rightarrow$ local **Ollama** (`qwen2.5-coder:14b`) seamlessly.
+* **Human-in-the-Loop Safety:** Destructive actions (e.g., shell commands, background process launches, file deletions, git pushes) require explicit confirmation before execution.
+* **Persistent Python Execution:** Interactive code execution inside isolated Jupyter kernels for data science and ML workloads.
+* **Repository & File Management:** Scans directory trees, respects `.gitignore`, runs `ripgrep` searches, and performs patch edits.
+* **Automated Git Workflows:** Stages changes, handles commits, checks diffs, and creates feature branches.
+* **Observability & Resilience:** Automatic context window trimming, rate-limit retry logic, tool-hallucination auto-healing, and event logging.
+
+---
+
+## 🛠️ Workflow & Architecture
+
+The execution lifecycle is modeled as a state machine using **LangGraph**.
 
 ```
-┌─────────────────────────────────────────────┐
-│                  LLM (groq)                │
-│         via API, function calling         # Local Python Coding Agent — Requirements & Tools
-
-Personal-use coding agent for Python backend development (Flask/FastAPI) and
-ML/DL/data analysis work. Runs locally, single user, no enterprise
-orchestration needed.
-
----
-
-## 1. Architecture Overview
-
-```
-┌─────────────────────────────────────────────┐
-│                  LLM (groq)                │
-│         via API, function calling            │
-└───────────────────┬───────────────────────────┘
-                     │
-        ┌────────────┴────────────┐
-        │      Agent Harness       │  (you build this)
-        │  - tool routing          │
-        │  - context/memory mgmt   │
-        │  - checkpointing         │
-        └────────────┬────────────┘
-                     │
-   ┌─────────┬───────┼────────┬──────────┐
-   │         │       │        │          │
- Shell     File I/O  Git   Python     Web Search
- Tool       Tool     Tool  Kernel      Tool
+                   +------------------------+
+                   |       START            |
+                   +-----------+------------+
+                               |
+                               v
+                       +---------------+
+                       |  agent_node   | <----------------+
+                       +-------+-------+                  |
+                               |                          |
+                   +-----------v-----------+              |
+                   |  route_after_agent    |              |
+                   +---+---------------+---+              |
+                       |               |                  |
+    (Tool Call Needs   |               | (Safe Tool Call) |
+      Confirmation)    |               |                  |
+                       v               v                  |
+                 +----------+    +------------+           |
+                 | confirm  | --->|   tools    +----------+
+                 |  _node   |    |   _node    |
+                 +----------+    +------------+
+                       |
+               (Terminal / Max Iterations / Error)
+                       |
+                       v
+                   +---+---+
+                   |  END  |
+                   +-------+
 ```
 
-Core principle: keep the harness thin. Most "tools" should just be shell
-commands the LLM invokes, not bespoke wrappers. The two exceptions worth
-building custom tools for are **file editing** (patch-based) and a
-**persistent Python execution environment** (for ML/data work).
+### Detailed Workflow Steps
+
+1. **Initialization (`run_agent`):**
+   * Loads configuration from environment variables (`.env`).
+   * Binds tools from `ALL_TOOLS` to the LLM model client.
+   * Generates or attaches to a unique `thread_id`.
+
+2. **Agent Node (`agent_node`):**
+   * Summarizes and prepares message context (collapses old tool outputs and slims large call parameters to fit model token bounds).
+   * Calls the configured provider chain (Groq $\rightarrow$ OpenRouter $\rightarrow$ Ollama).
+   * **Auto-Healing Rules:** Handles rate limiting with exponential backoff, recovers from leaked text JSON tool calls, and re-prompts on empty responses or tool hallucinations.
+
+3. **Routing (`route_after_agent`):**
+   * If the LLM generates a final text response or hits the maximum iteration count (`max_iterations`), the workflow terminates.
+   * If the LLM requests a tool call, the router determines whether human confirmation is required.
+
+4. **Human Confirmation Node (`confirm_node`):**
+   * Pauses the graph using `langgraph.types.interrupt`.
+   * Triggers the CLI input handler (or a custom UI callback).
+   * If approved, the workflow proceeds to execution. If declined, a message is injected back into the LLM context to explain the block and request an alternative plan.
+
+5. **Tool Execution Node (`tools_node`):**
+   * Executes the requested tool function.
+   * Truncates outputs exceeding character limits (1,200 characters by default) to keep token usage efficient.
+   * Logs execution status and results to `agent_events.log`.
+   * Loops back to `agent_node` with the new tool results.
 
 ---
 
-## 2. Core Tools (build these first)
+## 🔒 Safety & Confirmation Rules
 
-### 2.1 Shell/Command Execution Tool
-- Executes arbitrary bash commands, returns stdout/stderr/exit code
-- Runs inside a project-specific venv or container (see §6)
-- Timeout + output truncation (long-running training jobs should be
-  backgrounded, not block the tool call — see §2.5)
+To prevent accidental data loss or unauthorized remote calls, specific tools trigger an interactive confirmation gate:
 
-### 2.2 File Operations Tool
-- `read_file(path, line_range=None)` — numbered line output for easy reference
-- `write_file(path, content)` — create new files
-- `edit_file(path, old_str, new_str)` — targeted patch, must match uniquely
-- `list_dir(path, depth=2)` — directory tree, respecting `.gitignore`
-
-Patch-based editing (not full-file rewrite) is important: saves tokens,
-avoids clobbering unrelated code, and produces reviewable diffs.
-
-### 2.3 Git Tool
-- `git status/diff/log/branch/commit/checkout`
-- Auto-commit checkpoint before agent makes changes, so every session is
-  reversible with `git reset` or `git revert`
-- Consider a dedicated branch per agent session (e.g. `agent/task-name`)
-  so you can review before merging to `main`
-
-### 2.4 Code Search Tool
-- **ripgrep (`rg`)** for fast text/regex search across the repo
-- Optional: tree-sitter or a language server (Pyright) for symbol-level
-  search (go-to-definition, find-references) — much better than regex once
-  your codebase grows past a few thousand lines
-
-### 2.5 Persistent Python Execution Tool (most important custom tool)
-For ML/data work, one-shot shell calls are wasteful (re-importing torch,
-reloading a 2GB CSV every call). Build a tool backed by a **persistent
-Jupyter kernel**:
-
-- Use `jupyter_client` to start/manage a kernel per project
-- `execute_code(code)` → returns stdout, stderr, rich outputs (dataframes,
-  matplotlib images as base64, errors with traceback)
-- Kernel state persists across calls within a session — variables, loaded
-  models, dataframes all stay in memory
-- For long-running training: launch as a **background process** via shell
-  (`nohup`, `tmux`, or `subprocess.Popen`) instead of blocking the kernel,
-  and give the agent a `tail_log(path, n_lines)` tool to check progress
-
-### 2.6 Web Search / Doc Fetch Tool
-- For current library docs, error message lookup, API references
-- Avoids the agent guessing from stale training data on fast-moving
-  libraries (transformers, langchain, fastapi, etc.)
-
----
-
-## 3. Language & Package Tooling
-
-| Purpose | Tool | Notes |
+| Tool | Trigger Condition | Danger Level |
 |---|---|---|
-| Dependency mgmt | `uv` (preferred) or `poetry` | `uv` is much faster for repeated agent-driven installs |
-| Env isolation | `venv` per project | Never let the agent install globally |
-| Multiple Python versions | `pyenv` | If projects pin different versions |
-| Linting | `ruff` | Fast, replaces flake8+isort+more |
-| Formatting | `black` (or `ruff format`) | Run automatically after edits |
-| Type checking | `mypy` or `pyright` | Pyright also gives you LSP-style navigation |
-| Testing | `pytest` | Standard; agent should run this after every change |
+| `run_shell_command` | Always | High |
+| `git_push` | Requires `confirm=True` & Human Approval | High |
+| `delete_path` | Requires `confirm=True` & Human Approval | High |
+| `launch_background_process` | Always | Medium |
+| `write_file` | When `overwrite=True` | Medium |
 
 ---
 
-## 4. Flask/FastAPI-Specific Tools
+## 📦 Requirements & Dependencies
 
-- **uvicorn** (FastAPI) / **flask run** — spin up the app for live testing
-- **httpx / curl / httpie** — hit endpoints and inspect responses after changes
-- **pytest + FastAPI `TestClient` / Flask `test_client`** — route testing
-  without a running server
-- **Alembic** (if using SQLAlchemy) — generate/apply migrations; treat
-  applying migrations as a "confirm before running" step even solo, since
-  they're hard to undo cleanly
-- **FastAPI's auto OpenAPI schema** (`/openapi.json`) — give the agent this
-  as context instead of re-reading every route file to understand your API
-  surface
+### Prerequisites
+* **Python:** 3.10 or higher
+* **Optional System Dependencies:**
+  * `ripgrep` (`rg`): Required for `ripgrep_search` tool.
+  * `Ollama`: Required if local model fallback mode is enabled.
+  * `nvidia-smi`: Required for `check_gpu_status`.
 
----
+### Core Python Packages
 
-## 5. ML/DL Engineering Tools
-
-- **GPU visibility**: shell access to `nvidia-smi` so the agent checks
-  VRAM/utilization before launching a training job (prevents OOM crashes
-  it has no way to diagnose otherwise)
-- **Experiment tracking**: MLflow (self-hosted, fully local) or Weights &
-  Biases — lets the agent log runs and **read back past metrics**, so it
-  can answer "did this change actually help" instead of guessing
-- **Background job execution + log tailing** — training runs are long;
-  agent should launch and detach, then check in later via log tail or
-  tracking API
-- **Checkpoint convention** — fixed directories (e.g. `models/`,
-  `checkpoints/`) so the agent doesn't need to be told every time
-- **Framework libs**: torch/tensorflow, scikit-learn, transformers, etc. —
-  installed per-project venv, not global
-
----
-
-## 6. Data Analysis Tools
-
-- **pandas** and/or **polars** in the environment
-- Persistent kernel (§2.5) is what makes this usable — avoids reloading
-  large datasets every tool call
-- Plot capture: matplotlib/seaborn figures returned as images from the
-  kernel tool so you (and the agent) can actually see output
-- Optional: **pandera** or **great_expectations** for data validation if
-  pipelines need it — skip otherwise, adds overhead for personal use
-
----
-
-## 7. Environment & Safety Setup
-
-Even for solo local use, a few guardrails save you real pain:
-
-- **Per-project venv or container** — isolates ML dependency hell
-  (CUDA/torch version conflicts) from web project dependencies
-- **`.gitignore` discipline** — prevent the agent from committing model
-  checkpoints, large datasets, or `.env` files
-- **Git checkpoint before agent sessions** — cheap insurance, instant rollback
-- **Resource awareness** — agent should check GPU/RAM/disk before starting
-  a new training job if one may already be running
-- **Confirm-before-run list** — even in a personal tool, flag a few
-  destructive-ish actions for manual confirmation rather than full auto-run:
-  - `git push`
-  - Applying DB migrations
-  - Deleting files/directories
-  - Anything that touches real (non-test) data
-- **Secrets handling** — load API keys/DB credentials from `.env`, never
-  let the agent print or log them; exclude `.env` from any context sent
-  to the LLM
-
----
-
-## 8. Agent Harness Requirements (the orchestration layer)
-
-Beyond individual tools, the harness itself needs:
-
-- **Tool-calling loop** — LLM proposes tool call → harness executes →
-  result fed back → repeat until done
-- **Context/memory management** — summarize old tool outputs, avoid
-  blowing the context window with full file dumps or long logs
-- **Self-verification loop** — after edits, automatically run
-  lint → type-check → tests, feed failures back to the LLM to self-correct
-- **Session logging** — record every tool call + result for your own
-  debugging of the agent's behavior
-- **Simple permission gate** — a config list of command patterns that
-  require your manual "yes" (see §7) vs. ones that auto-run
-
----
-
-## 9. Suggested Build Order
-
-1. Shell tool + file read/write/edit + git — get a minimal loop working
-2. Add ripgrep-based search
-3. Add pytest/lint/type-check as post-edit verification steps
-4. Add persistent Jupyter kernel tool for ML/data work
-5. Add web search for doc lookups
-6. Add background job launching + log tailing for training runs
-7. Add MLflow integration for experiment read-back
-8. Layer in the confirm-before-run gate and session logging last, once
-   the core loop is trustworthy
-
----
-
-## 10. Minimal Library List (Python side of the harness)
-
-```
-groq          # groq API client
-jupyter_client      # persistent kernel for code execution tool
-GitPython           # git tool (or just shell out to `git`)
-python-dotenv        # secrets/env loading
-uv (as CLI, not lib) # dependency management inside managed projects
+```text
+pydantic>=2.0
+langgraph
+langchain-core
+langchain-openai
+langchain-ollama
+jupyter_client
+httpx
+python-dotenv
+pathspec               # Optional: for gitignore parsing in directory listing
+duckduckgo-search     # Optional: for web_search tool
 ```
 
-Everything else (ripgrep, pytest, ruff, mypy, uvicorn, nvidia-smi, mlflow
-CLI) is invoked via the shell tool rather than imported as a library —
-keeps the harness itself simple and lets you swap tools per-project
-without touching agent code.
-   │
-└───────────────────┬───────────────────────────┘
-                     │
-        ┌────────────┴────────────┐
-        │      Agent Harness       │  (you build this)
-        │  - tool routing          │
-        │  - context/memory mgmt   │
-        │  - checkpointing         │
-        └────────────┬────────────┘
-                     │
-   ┌─────────┬───────┼────────┬──────────┐
-   │         │       │        │          │
- Shell     File I/O  Git   Python     Web Search
- Tool       Tool     Tool  Kernel      Tool
+---
+
+## ⚙️ Environment & Configuration
+
+Create a `.env` file in the root directory:
+
+```ini
+# Primary Provider (Groq)
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_BASE_URL=https://api.groq.com/openai/v1
+GROQ_TEMPERATURE=0.1
+GROQ_MAX_TOKENS=4096
+GROQ_REQUEST_TIMEOUT=60.0
+GROQ_MAX_RETRIES=3
+
+# Fallback Tier 1 (OpenRouter) - Optional
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_MODEL=openai/gpt-oss-120b:free
+
+# Fallback Tier 2 (Local Ollama) - Optional
+AGENT_ENABLE_OLLAMA_FALLBACK=true
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5-coder:14b
+OLLAMA_NUM_CTX=4096
+
+# Agent Controls
+AGENT_PROVIDER_MODE=api        # Options: 'api' or 'local'
+AGENT_MAX_ITERATIONS=20
+AGENT_LOG_FILE=agent_events.log
 ```
 
-Core principle: keep the harness thin. Most "tools" should just be shell
-commands the LLM invokes, not bespoke wrappers. The two exceptions worth
-building custom tools for are **file editing** (patch-based) and a
-**persistent Python execution environment** (for ML/data work).
+---
+
+## 🛠️ Tool Reference
+
+The agent comes equipped with 20 pre-built tools across 6 operational categories:
+
+### 1. File Operations (`file_tool.py`)
+* `read_file(path, start_line, end_line)`: Reads files with line numbers; caps output at 300 lines by default.
+* `write_file(path, content, overwrite)`: Creates new files; requires approval if overwriting.
+* `append_file(path, content, create_if_missing)`: Appends data; ideal for building large files in chunks.
+* `edit_file(path, old_str, new_str)`: Replaces exact, unique code snippets.
+* `list_dir(path, depth)`: Displays folder trees while honoring `.gitignore`.
+
+### 2. Version Control (`git_tool.py`)
+* `git_status`: Displays branch information and uncommitted changes.
+* `git_diff`: Shows staged/unstaged changes.
+* `git_log`: Lists recent commit history.
+* `git_branch`: Lists or creates branches.
+* `git_checkout`: Switches branches or restores files.
+* `git_commit`: Stages and commits changes.
+* `git_push`: Pushes branch to remote (`confirm=True` required).
+
+### 3. Code Execution & Notebooks (`jupyter_tool.py`)
+* `execute_code(code, project_id)`: Runs Python inside a persistent Jupyter kernel. Preserves variables across calls.
+* `restart_kernel(project_id)`: Resets state and frees VRAM/RAM.
+
+### 4. Search & Discovery (`search_tool.py`)
+* `ripgrep_search(pattern, path, file_type)`: Fast code search via `rg`.
+* `web_search(query)`: Fetches up-to-date online documentation via DuckDuckGo.
+
+### 5. System & Process Management (`shell_tool.py`, `system_tool.py`)
+* `run_shell_command(command, cwd, timeout)`: Runs CLI commands (tests, linters).
+* `check_gpu_status`: Queries `nvidia-smi` for GPU VRAM and usage.
+* `launch_background_process(command, job_name)`: Runs long-running tasks in the background.
+* `tail_log(job_name, n_lines)`: Inspects background task output logs.
+* `delete_path(path, confirm)`: Deletes files or folders (`confirm=True` required).
+
+### 6. API Helpers (`api_tool.py`)
+* `http_request(url, method, json_body, headers)`: Tests local or remote HTTP endpoints.
+* `fetch_openapi_schema(base_url)`: Retrieves OpenAPI JSON specs from web endpoints (e.g., FastAPI/Flask).
 
 ---
 
-## 2. Core Tools (build these first)
+## 🚀 Quickstart Usage
 
-### 2.1 Shell/Command Execution Tool
-- Executes arbitrary bash commands, returns stdout/stderr/exit code
-- Runs inside a project-specific venv or container (see §6)
-- Timeout + output truncation (long-running training jobs should be
-  backgrounded, not block the tool call — see §2.5)
+### Basic Python Usage
 
-### 2.2 File Operations Tool
-- `read_file(path, line_range=None)` — numbered line output for easy reference
-- `write_file(path, content)` — create new files
-- `edit_file(path, old_str, new_str)` — targeted patch, must match uniquely
-- `list_dir(path, depth=2)` — directory tree, respecting `.gitignore`
+```python
+from agent import run_agent
 
-Patch-based editing (not full-file rewrite) is important: saves tokens,
-avoids clobbering unrelated code, and produces reviewable diffs.
+# Run a single task
+result = run_agent("Inspect the files in this repository and list all TODO comments")
 
-### 2.3 Git Tool
-- `git status/diff/log/branch/commit/checkout`
-- Auto-commit checkpoint before agent makes changes, so every session is
-  reversible with `git reset` or `git revert`
-- Consider a dedicated branch per agent session (e.g. `agent/task-name`)
-  so you can review before merging to `main`
-
-### 2.4 Code Search Tool
-- **ripgrep (`rg`)** for fast text/regex search across the repo
-- Optional: tree-sitter or a language server (Pyright) for symbol-level
-  search (go-to-definition, find-references) — much better than regex once
-  your codebase grows past a few thousand lines
-
-### 2.5 Persistent Python Execution Tool (most important custom tool)
-For ML/data work, one-shot shell calls are wasteful (re-importing torch,
-reloading a 2GB CSV every call). Build a tool backed by a **persistent
-Jupyter kernel**:
-
-- Use `jupyter_client` to start/manage a kernel per project
-- `execute_code(code)` → returns stdout, stderr, rich outputs (dataframes,
-  matplotlib images as base64, errors with traceback)
-- Kernel state persists across calls within a session — variables, loaded
-  models, dataframes all stay in memory
-- For long-running training: launch as a **background process** via shell
-  (`nohup`, `tmux`, or `subprocess.Popen`) instead of blocking the kernel,
-  and give the agent a `tail_log(path, n_lines)` tool to check progress
-
-### 2.6 Web Search / Doc Fetch Tool
-- For current library docs, error message lookup, API references
-- Avoids the agent guessing from stale training data on fast-moving
-  libraries (transformers, langchain, fastapi, etc.)
-
----
-
-## 3. Language & Package Tooling
-
-| Purpose | Tool | Notes |
-|---|---|---|
-| Dependency mgmt | `uv` (preferred) or `poetry` | `uv` is much faster for repeated agent-driven installs |
-| Env isolation | `venv` per project | Never let the agent install globally |
-| Multiple Python versions | `pyenv` | If projects pin different versions |
-| Linting | `ruff` | Fast, replaces flake8+isort+more |
-| Formatting | `black` (or `ruff format`) | Run automatically after edits |
-| Type checking | `mypy` or `pyright` | Pyright also gives you LSP-style navigation |
-| Testing | `pytest` | Standard; agent should run this after every change |
-
----
-
-## 4. Flask/FastAPI-Specific Tools
-
-- **uvicorn** (FastAPI) / **flask run** — spin up the app for live testing
-- **httpx / curl / httpie** — hit endpoints and inspect responses after changes
-- **pytest + FastAPI `TestClient` / Flask `test_client`** — route testing
-  without a running server
-- **Alembic** (if using SQLAlchemy) — generate/apply migrations; treat
-  applying migrations as a "confirm before running" step even solo, since
-  they're hard to undo cleanly
-- **FastAPI's auto OpenAPI schema** (`/openapi.json`) — give the agent this
-  as context instead of re-reading every route file to understand your API
-  surface
-
----
-
-## 5. ML/DL Engineering Tools
-
-- **GPU visibility**: shell access to `nvidia-smi` so the agent checks
-  VRAM/utilization before launching a training job (prevents OOM crashes
-  it has no way to diagnose otherwise)
-- **Experiment tracking**: MLflow (self-hosted, fully local) or Weights &
-  Biases — lets the agent log runs and **read back past metrics**, so it
-  can answer "did this change actually help" instead of guessing
-- **Background job execution + log tailing** — training runs are long;
-  agent should launch and detach, then check in later via log tail or
-  tracking API
-- **Checkpoint convention** — fixed directories (e.g. `models/`,
-  `checkpoints/`) so the agent doesn't need to be told every time
-- **Framework libs**: torch/tensorflow, scikit-learn, transformers, etc. —
-  installed per-project venv, not global
-
----
-
-## 6. Data Analysis Tools
-
-- **pandas** and/or **polars** in the environment
-- Persistent kernel (§2.5) is what makes this usable — avoids reloading
-  large datasets every tool call
-- Plot capture: matplotlib/seaborn figures returned as images from the
-  kernel tool so you (and the agent) can actually see output
-- Optional: **pandera** or **great_expectations** for data validation if
-  pipelines need it — skip otherwise, adds overhead for personal use
-
----
-
-## 7. Environment & Safety Setup
-
-Even for solo local use, a few guardrails save you real pain:
-
-- **Per-project venv or container** — isolates ML dependency hell
-  (CUDA/torch version conflicts) from web project dependencies
-- **`.gitignore` discipline** — prevent the agent from committing model
-  checkpoints, large datasets, or `.env` files
-- **Git checkpoint before agent sessions** — cheap insurance, instant rollback
-- **Resource awareness** — agent should check GPU/RAM/disk before starting
-  a new training job if one may already be running
-- **Confirm-before-run list** — even in a personal tool, flag a few
-  destructive-ish actions for manual confirmation rather than full auto-run:
-  - `git push`
-  - Applying DB migrations
-  - Deleting files/directories
-  - Anything that touches real (non-test) data
-- **Secrets handling** — load API keys/DB credentials from `.env`, never
-  let the agent print or log them; exclude `.env` from any context sent
-  to the LLM
-
----
-
-## 8. Agent Harness Requirements (the orchestration layer)
-
-Beyond individual tools, the harness itself needs:
-
-- **Tool-calling loop** — LLM proposes tool call → harness executes →
-  result fed back → repeat until done
-- **Context/memory management** — summarize old tool outputs, avoid
-  blowing the context window with full file dumps or long logs
-- **Self-verification loop** — after edits, automatically run
-  lint → type-check → tests, feed failures back to the LLM to self-correct
-- **Session logging** — record every tool call + result for your own
-  debugging of the agent's behavior
-- **Simple permission gate** — a config list of command patterns that
-  require your manual "yes" (see §7) vs. ones that auto-run
-
----
-
-## 9. Suggested Build Order
-
-1. Shell tool + file read/write/edit + git — get a minimal loop working
-2. Add ripgrep-based search
-3. Add pytest/lint/type-check as post-edit verification steps
-4. Add persistent Jupyter kernel tool for ML/data work
-5. Add web search for doc lookups
-6. Add background job launching + log tailing for training runs
-7. Add MLflow integration for experiment read-back
-8. Layer in the confirm-before-run gate and session logging last, once
-   the core loop is trustworthy
-
----
-
-## 10. Minimal Library List (Python side of the harness)
-
-```
-groq          # groq API client
-jupyter_client      # persistent kernel for code execution tool
-GitPython           # git tool (or just shell out to `git`)
-python-dotenv        # secrets/env loading
-uv (as CLI, not lib) # dependency management inside managed projects
+print(f"Status: {result.status}")
+print(f"Iterations: {result.iterations}")
+print(f"Output:\n{result.output}")
 ```
 
-Everything else (ripgrep, pytest, ruff, mypy, uvicorn, nvidia-smi, mlflow
-CLI) is invoked via the shell tool rather than imported as a library —
-keeps the harness itself simple and lets you swap tools per-project
-without touching agent code.
+### Resume / Multi-Turn Session
+
+```python
+from agent import run_agent
+
+# First prompt
+res1 = run_agent("Create a new git branch called feature/test-suite")
+
+# Continue conversation using the same thread_id
+res2 = run_agent(
+    "Now write a test file test_app.py using pytest",
+    thread_id=res1.thread_id
+)
+```
+
+### Custom Confirmation Handler (e.g., Web/API Integration)
+
+```python
+from agent import run_agent
+from agent.schemas import ConfirmationDecision, ConfirmationRequest
+
+def custom_ui_handler(req: ConfirmationRequest) -> ConfirmationDecision:
+    # Wire this up to a Web UI, Discord bot, or Slack prompt
+    print(f"Approval Request for {req.tool_name} with args {req.tool_args}")
+    # Auto-approve or trigger webhook response
+    return ConfirmationDecision(approved=True)
+
+result = run_agent(
+    "Run pytest on the repository",
+    confirm_handler=custom_ui_handler
+)
+```
+
+---
+
+## 📝 Observability & Logging
+
+Every run automatically writes event lines to the log file configured by `AGENT_LOG_FILE` (`agent_events.log` by default). Each entry is formatted as a JSON line:
+
+```json
+{"timestamp": 1774567890.12, "event": "run_start", "thread_id": "8a32b2f...", "prompt": "Inspect repo...", "provider_mode": "api"}
+{"timestamp": 1774567891.45, "event": "llm_call", "thread_id": "8a32b2f...", "provider": "groq:openai/gpt-oss-120b"}
+{"timestamp": 1774567892.10, "event": "tool_call", "thread_id": "8a32b2f...", "tool_name": "list_dir", "args": {"path": "."}, "success": true, "result": "config.py\ngraph.py..."}
+{"timestamp": 1774567895.80, "event": "run_end", "thread_id": "8a32b2f...", "status": "completed", "iterations": 2, "tool_call_count": 1, "error": null}
+```
