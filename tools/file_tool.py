@@ -23,6 +23,9 @@ def _load_gitignore(root: Path):
     return None
 
 
+DEFAULT_MAX_READ_LINES = 300
+
+
 @tool
 def read_file(
     path: str,
@@ -31,6 +34,13 @@ def read_file(
 ) -> str:
     """Read a file's contents with 1-indexed line numbers, for easy reference
     when constructing later edit_file calls.
+
+    If start_line/end_line are omitted and the file has more than
+    DEFAULT_MAX_READ_LINES (300) lines, only the first 300 lines are
+    returned along with a note of how many more lines exist — pass an
+    explicit start_line/end_line to page through the rest instead of
+    reading (and re-reading) the whole file at once. This keeps large-file
+    reads from blowing a single request's token budget.
 
     Args:
         path: Path to the file to read.
@@ -45,10 +55,21 @@ def read_file(
     except Exception as e:
         return f"ERROR: {e}"
 
-    start = max(0, (start_line - 1) if start_line else 0)
-    end = min(len(lines), end_line if end_line else len(lines))
+    total = len(lines)
+    capped_note = ""
+    if start_line is None and end_line is None and total > DEFAULT_MAX_READ_LINES:
+        start, end = 0, DEFAULT_MAX_READ_LINES
+        capped_note = (
+            f"\n... [showing lines 1-{DEFAULT_MAX_READ_LINES} of {total}; "
+            f"pass start_line/end_line to read more, e.g. start_line={DEFAULT_MAX_READ_LINES + 1}]"
+        )
+    else:
+        start = max(0, (start_line - 1) if start_line else 0)
+        end = min(total, end_line if end_line else total)
+
     numbered = [f"{i + 1}\t{lines[i]}" for i in range(start, end)]
-    return "".join(numbered) if numbered else "(empty range)"
+    body = "".join(numbered) if numbered else "(empty range)"
+    return body + capped_note
 
 
 @tool

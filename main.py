@@ -3,11 +3,18 @@
 
 Keeps a conversation thread alive across turns (so the agent remembers
 earlier context in the session), and shows tool calls as they happen.
-Confirmation prompts (shell commands, deletes, git push, background jobs)
-still go through the normal stdin y/N handler from agent.confirmation.
+Confirmation prompts (shell commands, deletes, git push, background jobs,
+overwriting files) still go through the normal stdin y/N handler from
+agent.confirmation.
+
+Model calls fall back automatically, in order: Groq -> OpenRouter (if
+OPENROUTER_API_KEY is set) -> local Ollama Qwen2.5-Coder (if enabled and
+`ollama serve` is running with the model pulled). Every tool call,
+confirmation decision, and LLM call/fallback is logged to config.log_file
+(default: agent_events.log) — use /logs to tail it from here.
 
 Run from the project root (same level as main.py):
-    python interactive_cli.py
+    python main.py
 
 Optional, for nicer output:
     pip install rich
@@ -15,16 +22,21 @@ Optional, for nicer output:
 Commands:
     /new              start a fresh conversation (new thread id, clears context)
     /model <name>     switch the model for the rest of this session
+    /provider [api|local]   switch between the API chain and local-only mode
     /tools            list available tools
     /history          show all tool calls made so far in this session
+    /logs             tail the recent entries in the event log file
     /help             show this message
     /exit, /quit      exit the REPL
 """
 
+import argparse
 import sys
 import uuid
+from pathlib import Path
 
 from agent import AgentConfig, run_agent
+from agent.logging_utils import log_event
 from tools import ALL_TOOLS
 
 try:
@@ -43,8 +55,11 @@ HELP_TEXT = """
 Commands:
   /new              start a fresh conversation (new thread id, clears context)
   /model <name>     switch the model for the rest of this session
+  /provider [api|local]   switch between the API chain (Groq->OpenRouter->
+                    local fallback) and local-only mode (Ollama only)
   /tools            list available tools
   /history          show all tool calls made so far in this session
+  /logs             tail the recent entries in the event log file
   /help             show this message
   /exit, /quit      exit the REPL
 """
@@ -93,11 +108,60 @@ def _list_tools() -> str:
     return "\n".join(lines)
 
 
+def _fallback_summary(config: AgentConfig) -> str:
+    if config.provider_mode == "local":
+        return f"local-only: Ollama ({config.ollama_model})  [mode: local]"
+    tiers = [f"1. Groq ({config.model_name})"]
+    if config.openrouter_key_str():
+        tiers.append(f"2. OpenRouter ({config.fallback_model_name})")
+    if config.enable_ollama_fallback:
+        tiers.append(f"3. Local Ollama ({config.ollama_model}) — last resort")
+    chain = " → ".join(tiers) if len(tiers) > 1 else f"{tiers[0]}  (no fallback tiers configured)"
+    return f"{chain}  [mode: api]"
+
+
+def _tail_log(path: str, n: int = 25) -> str:
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return f"(no log file yet at `{path}` — it's created on the first run)"
+    except Exception as e:  # noqa: BLE001
+        return f"(couldn't read log file: {e})"
+    if not lines:
+        return "(log file is empty)"
+    tail = lines[-n:]
+    return "```\n" + "\n".join(tail) + "\n```"
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Local coding agent REPL")
+    parser.add_argument(
+        "--provider", choices=["api", "local"], default=None,
+        help="Force provider mode for this session: 'api' (Groq->OpenRouter->local "
+             "fallback) or 'local' (Ollama only). Defaults to AGENT_PROVIDER_MODE env "
+             "var, or 'api'.",
+    )
+    args = parser.parse_args()
+
     try:
         config = AgentConfig.from_env()
     except Exception as e:  # noqa: BLE001
         print(f"Config error: {e}")
+        sys.exit(1)
+
+    if args.provider:
+        try:
+            config = config.model_copy(update={"provider_mode": args.provider})
+        except Exception as e:  # noqa: BLE001
+            print(f"Invalid --provider value: {e}")
+            sys.exit(1)
+
+    if config.provider_mode == "local" and not config.enable_ollama_fallback:
+        print(
+            "provider_mode is 'local' but Ollama fallback is disabled "
+            "(enable_ollama_fallback=False / AGENT_ENABLE_OLLAMA_FALLBACK=false). "
+            "Enable it, or drop --provider local to use the API chain."
+        )
         sys.exit(1)
 
     thread_id = str(uuid.uuid4())
@@ -105,7 +169,8 @@ def main() -> None:
 
     _print_panel(
         "Local Coding Agent",
-        f"model: **{config.model_name}**  |  thread: `{thread_id[:8]}`\n\n"
+        f"model chain: {_fallback_summary(config)}\n"
+        f"thread: `{thread_id[:8]}`  |  log: `{config.log_file}`\n\n"
         "Type `/help` for commands, or just describe a task.",
     )
 
@@ -142,7 +207,29 @@ def main() -> None:
                 except Exception as e:  # noqa: BLE001
                     _print(f"couldn't switch model: {e}", style="red")
             else:
-                _print(f"current model: {config.model_name}")
+                _print(f"current model chain: {_fallback_summary(config)}")
+            continue
+
+        if user_input.startswith("/provider"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].strip().lower() in ("api", "local"):
+                new_mode = parts[1].strip().lower()
+                if new_mode == "local" and not config.enable_ollama_fallback:
+                    _print(
+                        "can't switch to local mode: Ollama fallback is disabled "
+                        "(enable_ollama_fallback=False).",
+                        style="red",
+                    )
+                    continue
+                old_mode = config.provider_mode
+                config = config.model_copy(update={"provider_mode": new_mode})
+                log_event(
+                    config.log_file, "provider_mode_changed", thread_id=thread_id,
+                    from_mode=old_mode, to_mode=new_mode,
+                )
+                _print(f"provider mode switched to: {new_mode}\n{_fallback_summary(config)}")
+            else:
+                _print(f"current provider mode: {config.provider_mode}\n{_fallback_summary(config)}\n\nusage: /provider api | /provider local")
             continue
 
         if user_input == "/tools":
@@ -151,6 +238,10 @@ def main() -> None:
 
         if user_input == "/history":
             _print_tool_calls(session_tool_log, title="All tool calls this session")
+            continue
+
+        if user_input == "/logs":
+            _print_panel(f"Recent events — {config.log_file}", _tail_log(config.log_file))
             continue
 
         if user_input.startswith("/"):

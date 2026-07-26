@@ -1,8 +1,9 @@
 import re
 import time
-from typing import Literal
+from typing import Any, Literal, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import interrupt
@@ -10,6 +11,7 @@ from langgraph.types import interrupt
 from .config import AgentConfig
 from .confirmation import needs_confirmation
 from .llm import get_llm_with_tools
+from .logging_utils import log_event, safe_args
 from .schemas import AgentState, ConfirmationRequest, ToolCallLog
 
 MAX_TOOL_OUTPUT_CHARS = 3000
@@ -39,7 +41,7 @@ _RETRY_AFTER_RE = re.compile(r"try again in\s+([\d.]+)\s*s", re.IGNORECASE)
 MAX_RATE_LIMIT_WAIT_SECONDS = 90.0
 
 
-def _parse_retry_after(msg: str) -> float | None:
+def _parse_retry_after(msg: str) -> Optional[float]:
     match = _RETRY_AFTER_RE.search(msg)
     if not match:
         return None
@@ -47,6 +49,31 @@ def _parse_retry_after(msg: str) -> float | None:
         return float(match.group(1))
     except ValueError:
         return None
+
+
+def _thread_id(run_config: Optional[dict]) -> str:
+    """Pull thread_id out of the RunnableConfig LangGraph injects into any
+    node function whose signature accepts a second argument."""
+    try:
+        return (run_config or {}).get("configurable", {}).get("thread_id", "unknown")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _identify_provider(response: Any, config: AgentConfig) -> str:
+    """Best-effort guess at which tier of the Groq -> OpenRouter -> Ollama
+    fallback chain actually answered — with_fallbacks() doesn't tag this
+    directly, so it's inferred from response metadata. Logging visibility
+    only; never used for control flow."""
+    meta = getattr(response, "response_metadata", {}) or {}
+    model = meta.get("model_name") or meta.get("model") or ""
+    if model == config.model_name:
+        return f"groq:{model}"
+    if model == config.fallback_model_name:
+        return f"openrouter:{model}"
+    if model == config.ollama_model or "done_reason" in meta:  # ollama-specific metadata key
+        return f"ollama:{model or config.ollama_model}"
+    return model or "unknown"
 
 
 SYSTEM_PROMPT = (
@@ -62,7 +89,17 @@ SYSTEM_PROMPT = (
     "Instead: call write_file with the first chunk (e.g. imports, first class/function or "
     "section, ~100-150 lines), then call append_file one or more times to add the rest in "
     "similarly sized chunks. Plan the file's structure first, then write it section by "
-    "section across multiple tool calls rather than one large completion."
+    "section across multiple tool calls rather than one large completion.\n\n"
+    "IMPORTANT — tools: only ever call a tool using its exact name from the tools provided "
+    "for this request. Never invent, guess, or reuse a tool name from a different framework "
+    "or convention that wasn't given to you.\n\n"
+    "IMPORTANT — reading many files (e.g. summarizing/mapping a whole directory or building a "
+    "diagram across many models): do NOT read every file in full up front. Use ripgrep_search or "
+    "list_dir first to scope down to what's relevant, then read_file with an explicit start_line/"
+    "end_line range (a few hundred lines at a time) rather than the whole file. Process files one "
+    "or a few at a time and summarize what you learned in your own words before moving on, instead "
+    "of keeping every full file's content in play — this avoids hitting token-per-minute/context "
+    "limits on long exploratory tasks."
 )
 
 
@@ -74,6 +111,37 @@ def _truncate(text: object, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
 
 
 MAX_TOOL_CALL_ARG_CHARS = 300
+
+RECENT_TOOL_RESULTS_KEPT_FULL = 4
+COLLAPSED_TOOL_RESULT_CHARS = 300
+
+
+def _collapse_old_tool_results(messages: list[BaseMessage]) -> list[BaseMessage]:
+    tool_msg_indices = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
+    collapse_indices = set(tool_msg_indices[:-RECENT_TOOL_RESULTS_KEPT_FULL]) if len(
+        tool_msg_indices
+    ) > RECENT_TOOL_RESULTS_KEPT_FULL else set()
+    if not collapse_indices:
+        return messages
+
+    prepared = []
+    for i, m in enumerate(messages):
+        if i in collapse_indices:
+            content = str(m.content)
+            short = content[:COLLAPSED_TOOL_RESULT_CHARS]
+            m = m.model_copy(
+                update={
+                    "content": (
+                        f"{short}\n... [collapsed: {len(content) - len(short)} older chars omitted — "
+                        "this was an earlier tool result no longer kept in full; re-run the tool "
+                        "call if you need the complete output again]"
+                    )
+                    if len(content) > len(short)
+                    else content
+                }
+            )
+        prepared.append(m)
+    return prepared
 
 
 def _slim_tool_calls(tool_calls: list) -> list:
@@ -91,9 +159,10 @@ def _slim_tool_calls(tool_calls: list) -> list:
 
 def _prepare_messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
     """Return a copy of the history to send to the LLM with large tool-call
-    arguments shortened (see MAX_TOOL_CALL_ARG_CHARS). Only affects what's
+    arguments shortened and older tool RESULTS collapsed. Only affects what's
     sent on the wire for this request — state.messages (used for tool
     execution, logging, etc.) is untouched."""
+    messages = _collapse_old_tool_results(messages)
     prepared = []
     for m in messages:
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
@@ -111,7 +180,7 @@ def _last_ai_message_with_tool_calls(messages: list[BaseMessage]):
     return None
 
 
-def build_graph(config: AgentConfig, tools: list):
+def build_graph(agent_config: AgentConfig, tools: list):
     """Compile the agent graph for a given config + toolset. Call once per
     process per (config, toolset) pair — the graph object itself is cheap to
     reuse across many run_agent() calls with different thread_ids."""
@@ -122,19 +191,21 @@ def build_graph(config: AgentConfig, tools: list):
     if not tools:
         raise ValueError("tools list must not be empty")
 
-    llm_with_tools = get_llm_with_tools(config, tools)
+    llm_with_tools = get_llm_with_tools(agent_config, tools)
     tools_by_name = {t.name: t for t in tools}
 
     # ---- nodes -------------------------------------------------------
 
-    def agent_node(state: AgentState) -> dict:
-        # Loop guard: stop calling the model once we've hit the cap
-        if state.iterations >= config.max_iterations:
+    def agent_node(state: AgentState, config: RunnableConfig) -> dict:
+        thread_id = _thread_id(config)
+
+        # Loop guard: stop calling the model once we've hit the cap.
+        if state.iterations >= agent_config.max_iterations:
             return {
                 "messages": [
                     AIMessage(
                         content=(
-                            f"Stopping: reached the max_iterations limit ({config.max_iterations}) "
+                            f"Stopping: reached the max_iterations limit ({agent_config.max_iterations}) "
                             "without finishing. Try narrowing the request, or re-run with a higher limit."
                         )
                     )
@@ -147,17 +218,25 @@ def build_graph(config: AgentConfig, tools: list):
             messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
         model_input = _prepare_messages_for_model(messages)
 
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         rate_limit_retries_left = 3
         attempt = 0
         while True:
             try:
                 response = llm_with_tools.invoke(model_input)
+                log_event(
+                    agent_config.log_file, "llm_call", thread_id=thread_id,
+                    provider=_identify_provider(response, agent_config),
+                )
                 return {"messages": [response], "iterations": state.iterations + 1}
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - provider errors are heterogeneous by design
                 last_error = e
                 msg = str(e).lower()
                 if any(marker in msg for marker in CONTEXT_LENGTH_MARKERS):
+                    log_event(
+                        agent_config.log_file, "llm_call_failed", thread_id=thread_id,
+                        reason="context_too_large", error=str(e),
+                    )
                     return {
                         "messages": [
                             AIMessage(
@@ -178,19 +257,32 @@ def build_graph(config: AgentConfig, tools: list):
                 is_retryable = is_rate_limit or any(marker in msg for marker in RETRYABLE_ERROR_MARKERS)
 
                 if is_rate_limit and rate_limit_retries_left > 0:
-                    wait = min((retry_after or config.retry_backoff_seconds) + 0.5, MAX_RATE_LIMIT_WAIT_SECONDS)
+                    wait = min((retry_after or agent_config.retry_backoff_seconds) + 0.5, MAX_RATE_LIMIT_WAIT_SECONDS)
                     print(f"[rate limited — waiting {wait:.1f}s before retrying the model call]")
+                    log_event(agent_config.log_file, "llm_rate_limited_wait", thread_id=thread_id, wait_seconds=wait)
                     time.sleep(wait)
                     rate_limit_retries_left -= 1
                     continue
 
-                if not is_retryable or attempt >= config.max_retries:
+                if not is_retryable or attempt >= agent_config.max_retries:
                     break
-                time.sleep(config.retry_backoff_seconds * (2**attempt))
+                time.sleep(agent_config.retry_backoff_seconds * (2**attempt))
                 attempt += 1
 
+        log_event(
+            agent_config.log_file, "llm_call_failed", thread_id=thread_id,
+            reason="all_providers_exhausted", error=str(last_error),
+        )
         return {
-            "messages": [AIMessage(content=f"Critical API Error: Both primary (Groq) and fallback (OpenRouter) models failed to respond or hit unrecoverable limits. Details: {last_error}")],
+            "messages": [
+                AIMessage(
+                    content=(
+                        "I hit an error calling the model across every configured provider "
+                        f"(Groq, OpenRouter, and local Ollama — whichever are set up) and "
+                        f"couldn't recover: {last_error}"
+                    )
+                )
+            ],
             "iterations": state.iterations + 1,
             "status": "error",
             "error": str(last_error),
@@ -227,24 +319,32 @@ def build_graph(config: AgentConfig, tools: list):
                 )
         return {"messages": new_messages} if new_messages else {}
 
-    def tools_node(state: AgentState) -> dict:
+    def tools_node(state: AgentState, config: RunnableConfig) -> dict:
+        thread_id = _thread_id(config)
         messages = list(state.messages)
         last_ai = _last_ai_message_with_tool_calls(messages)
         tool_calls = last_ai.tool_calls if last_ai else []
-        already_answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+        answered = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
 
         new_messages: list[BaseMessage] = []
         logs: list[dict] = []
         for tc in tool_calls:
             call_id = tc["id"]
-            if call_id in already_answered:
-                continue
             name = tc["name"]
             args = tc.get("args", {}) or {}
+
+            if call_id in answered:
+
+                blocked_msg = answered[call_id]
+                log_event(
+                    agent_config.log_file, "tool_call_blocked", thread_id=thread_id,
+                    tool_name=name, args=safe_args(args), result=str(blocked_msg.content)[:500],
+                )
+                continue
+
             tool = tools_by_name.get(name)
 
             if tool is None:
-                # The model hallucinated a tool name — don't crash, tell it what's actually available.
                 output = f"ERROR: unknown tool '{name}'. Available tools: {', '.join(sorted(tools_by_name))}"
                 success = False
             else:
@@ -252,7 +352,7 @@ def build_graph(config: AgentConfig, tools: list):
                     raw_output = tool.invoke(args)
                     output = _truncate(raw_output)
                     success = not (isinstance(raw_output, str) and raw_output.startswith(("ERROR", "BLOCKED")))
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - bad args, tool bugs, etc. must not crash the graph
                     output = f"ERROR: tool '{name}' raised an exception: {e}"
                     success = False
 
@@ -261,6 +361,10 @@ def build_graph(config: AgentConfig, tools: list):
                 ToolCallLog(
                     call_id=call_id, tool_name=name, args=args, result=output, confirmed=True, success=success
                 ).model_dump()
+            )
+            log_event(
+                agent_config.log_file, "tool_call", thread_id=thread_id, tool_name=name,
+                args=safe_args(args), success=success, result=output[:500],
             )
 
         return {"messages": new_messages, "tool_log": logs}
