@@ -30,7 +30,7 @@ def _get_or_build_graph(config: AgentConfig, tools: list):
         config.provider_mode, config.model_name, config.fallback_model_name, config.ollama_model,
         config.enable_ollama_fallback, config.ollama_num_ctx, config.ollama_num_predict,
         config.ollama_keep_alive, config.ollama_num_thread,
-        config.temperature, config.max_tokens, tool_names,
+        config.temperature, config.max_tokens, config.confirm_all_tools, tool_names,
     )
     if cache_key not in _graph_cache:
         _graph_cache[cache_key] = build_graph(config, tools)
@@ -150,6 +150,9 @@ def run_agent(
     raw_tool_log = _field(final, "tool_log", []) or []
     tool_calls = [d if isinstance(d, ToolCallLog) else ToolCallLog.model_validate(d) for d in raw_tool_log]
 
+    if status == "completed" and tool_calls and not tool_calls[-1].success:
+        status = "completed_with_errors"
+
     result = AgentResult(
         output=output if isinstance(output, str) else str(output),
         status=status,
@@ -163,4 +166,3 @@ def run_agent(
         iterations=result.iterations, tool_call_count=len(result.tool_calls), error=result.error,
     )
     return result
-    

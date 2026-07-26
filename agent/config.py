@@ -39,6 +39,7 @@ class AgentConfig(BaseModel):
     log_file: str = "agent_events.log"
 
     provider_mode: str = "api"
+    confirm_all_tools: bool = False
 
     temperature: float = 0.1
     max_tokens: int = 4096
@@ -110,6 +111,9 @@ class AgentConfig(BaseModel):
         enable_ollama = os.environ.get("AGENT_ENABLE_OLLAMA_FALLBACK", "true").strip().lower() not in (
             "0", "false", "no", "off",
         )
+        confirm_all_tools = os.environ.get("AGENT_CONFIRM_ALL_TOOLS", "false").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
 
         return cls(
             groq_api_key=SecretStr(groq_key),
@@ -129,9 +133,11 @@ class AgentConfig(BaseModel):
             ),
             log_file=os.environ.get("AGENT_LOG_FILE", "agent_events.log"),
             provider_mode=os.environ.get("AGENT_PROVIDER_MODE", "api"),
+            confirm_all_tools=confirm_all_tools,
             temperature=float(os.environ.get("GROQ_TEMPERATURE", 0.1)),
             max_tokens=int(os.environ.get("GROQ_MAX_TOKENS", 4096)),
             max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", 20)),
             request_timeout=float(os.environ.get("GROQ_REQUEST_TIMEOUT", 60.0)),
             max_retries=int(os.environ.get("GROQ_MAX_RETRIES", 3)),
         )
+        

@@ -12,13 +12,19 @@ CONDITIONAL_CONFIRM_TOOLS = {
 }
 
 
-def needs_confirmation(tool_name: str, tool_args: dict) -> bool:
+def needs_confirmation(tool_name: str, tool_args: dict, confirm_all: bool = False) -> bool:
     """True if this specific tool call requires human approval before running.
 
     Checked per-call (not just per-tool-name) so conditional gates like
     write_file's overwrite flag only trigger when the destructive argument
     is actually set.
+
+    confirm_all=True (see AgentConfig.confirm_all_tools) overrides everything
+    below and requires confirmation for every tool call, regardless of name
+    or args — useful when you want to review each action one at a time.
     """
+    if confirm_all:
+        return True
     if tool_name in ALWAYS_CONFIRM_TOOLS:
         return True
     check = CONDITIONAL_CONFIRM_TOOLS.get(tool_name)
@@ -50,3 +56,4 @@ def default_cli_confirmation_handler(request: ConfirmationRequest) -> Confirmati
     if answer in ("y", "yes"):
         return ConfirmationDecision(approved=True)
     return ConfirmationDecision(approved=False, reason="declined by user")
+    

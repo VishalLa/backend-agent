@@ -156,7 +156,12 @@ def edit_file(
 
     count = content.count(old_str)
     if count == 0:
-        return "ERROR: old_str not found in file"
+        return (
+            "ERROR: old_str not found in file. Do not guess or reconstruct old_str from memory of "
+            "an earlier write/edit — call read_file on this exact path first to see its current "
+            "content, then copy old_str verbatim (including whitespace/newlines) from that result "
+            "before retrying edit_file."
+        )
     if count > 1:
         return f"ERROR: old_str is not unique ({count} occurrences) — include more surrounding context"
 

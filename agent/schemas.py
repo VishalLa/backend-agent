@@ -6,7 +6,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field
 
-Status = Literal["running", "completed", "max_iterations_reached", "error", "cancelled"]
+Status = Literal["running", "completed", "completed_with_errors", "max_iterations_reached", "error", "cancelled"]
 
 
 class ToolCallLog(BaseModel):

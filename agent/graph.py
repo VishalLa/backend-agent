@@ -147,7 +147,16 @@ SYSTEM_PROMPT = (
     "Only call tools by their exact given names, never invented ones.\n"
     "Scanning many files (e.g. mapping a whole directory): use ripgrep_search/list_dir to "
     "scope down first, then read_file in ranges, one file at a time — don't read everything "
-    "in full, it will exceed the per-request token budget."
+    "in full, it will exceed the per-request token budget.\n"
+    "NEVER construct edit_file's old_str from memory of an earlier write_file/edit_file call or "
+    "an older turn in this conversation — the arguments of older tool calls get automatically "
+    "shortened as the conversation grows and are no longer reliable. Always call read_file on the "
+    "exact path immediately before edit_file (even a file you just wrote) and copy old_str verbatim, "
+    "including whitespace and newlines, from that fresh read_file result. If edit_file still reports "
+    "old_str not found after doing this, re-read the file again rather than guessing at a fix.\n"
+    "Never tell the user a file was created/updated/saved unless the corresponding write_file/"
+    "append_file/edit_file call actually returned success — if every attempt at a requested file "
+    "change failed, say so plainly and explain what went wrong instead of describing the change as done."
 )
 
 
@@ -401,7 +410,7 @@ def build_graph(agent_config: AgentConfig, tools: list):
         new_messages: list[BaseMessage] = []
         for tc in tool_calls:
             args = tc.get("args", {}) or {}
-            if not needs_confirmation(tc["name"], args):
+            if not needs_confirmation(tc["name"], args, agent_config.confirm_all_tools):
                 continue
             request = ConfirmationRequest(
                 tool_name=tc["name"],
@@ -484,7 +493,7 @@ def build_graph(agent_config: AgentConfig, tools: list):
         tool_calls = getattr(last, "tool_calls", None) or []
         if not tool_calls:
             return "__end__"
-        if any(needs_confirmation(tc["name"], tc.get("args", {}) or {}) for tc in tool_calls):
+        if any(needs_confirmation(tc["name"], tc.get("args", {}) or {}, agent_config.confirm_all_tools) for tc in tool_calls):
             return "confirm"
         return "tools"
 
@@ -502,3 +511,4 @@ def build_graph(agent_config: AgentConfig, tools: list):
 
     checkpointer = InMemorySaver()
     return builder.compile(checkpointer=checkpointer)
+    

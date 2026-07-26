@@ -23,6 +23,7 @@ Commands:
     /new              start a fresh conversation (new thread id, clears context)
     /model <name>     switch the model for the rest of this session
     /provider [api|local]   switch between the API chain and local-only mode
+    /confirm-all [on|off]   require confirmation before EVERY tool call
     /tools            list available tools
     /history          show all tool calls made so far in this session
     /logs             tail the recent entries in the event log file
@@ -57,6 +58,9 @@ Commands:
   /model <name>     switch the model for the rest of this session
   /provider [api|local]   switch between the API chain (Groq->OpenRouter->
                     local fallback) and local-only mode (Ollama only)
+  /confirm-all [on|off]   require interactive confirmation before EVERY tool
+                    call (not just shell/delete/push/overwrite); no argument
+                    shows the current setting
   /tools            list available tools
   /history          show all tool calls made so far in this session
   /logs             tail the recent entries in the event log file
@@ -141,6 +145,13 @@ def main() -> None:
              "fallback) or 'local' (Ollama only). Defaults to AGENT_PROVIDER_MODE env "
              "var, or 'api'.",
     )
+    parser.add_argument(
+        "--confirm-all", action="store_true",
+        help="Require interactive confirmation before every tool call, not just "
+             "destructive ones (shell/delete/git push/background jobs/file overwrite). "
+             "Can also be toggled mid-session with /confirm-all on|off, or set "
+             "persistently via AGENT_CONFIRM_ALL_TOOLS=true.",
+    )
     args = parser.parse_args()
 
     try:
@@ -156,6 +167,9 @@ def main() -> None:
             print(f"Invalid --provider value: {e}")
             sys.exit(1)
 
+    if args.confirm_all:
+        config = config.model_copy(update={"confirm_all_tools": True})
+
     if config.provider_mode == "local" and not config.enable_ollama_fallback:
         print(
             "provider_mode is 'local' but Ollama fallback is disabled "
@@ -170,7 +184,8 @@ def main() -> None:
     _print_panel(
         "Local Coding Agent",
         f"model chain: {_fallback_summary(config)}\n"
-        f"thread: `{thread_id[:8]}`  |  log: `{config.log_file}`\n\n"
+        f"thread: `{thread_id[:8]}`  |  log: `{config.log_file}`  |  "
+        f"confirm-all: `{'ON' if config.confirm_all_tools else 'OFF'}`\n\n"
         "Type `/help` for commands, or just describe a task.",
     )
 
@@ -232,6 +247,25 @@ def main() -> None:
                 _print(f"current provider mode: {config.provider_mode}\n{_fallback_summary(config)}\n\nusage: /provider api | /provider local")
             continue
 
+        if user_input.startswith("/confirm-all"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].strip().lower() in ("on", "off"):
+                new_val = parts[1].strip().lower() == "on"
+                old_val = config.confirm_all_tools
+                config = config.model_copy(update={"confirm_all_tools": new_val})
+                log_event(
+                    config.log_file, "confirm_all_tools_changed", thread_id=thread_id,
+                    from_value=old_val, to_value=new_val,
+                )
+                if new_val:
+                    _print("confirm-all: ON — every tool call (including reads/searches) will ask for approval first.")
+                else:
+                    _print("confirm-all: OFF — only destructive tools (shell/delete/git push/background jobs/file overwrite) need approval.")
+            else:
+                state = "ON" if config.confirm_all_tools else "OFF"
+                _print(f"confirm-all is currently: {state}\n\nusage: /confirm-all on | /confirm-all off")
+            continue
+
         if user_input == "/tools":
             _print_panel("Available tools", _list_tools())
             continue
@@ -262,6 +296,10 @@ def main() -> None:
             _print(f"[status: error] {result.error}", style="red")
         elif result.status == "max_iterations_reached":
             _print(f"[status: stopped — hit max_iterations ({config.max_iterations})]", style="yellow")
+        elif result.status == "completed_with_errors":
+            last_failed = next((tc for tc in reversed(result.tool_calls) if not tc.success), None)
+            detail = f" last failed call: {last_failed.tool_name} -> {last_failed.result[:150]}" if last_failed else ""
+            _print(f"[status: completed, but the last tool call failed — double-check the result.{detail}]", style="yellow")
 
 
 if __name__ == "__main__":
