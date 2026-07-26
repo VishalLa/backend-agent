@@ -1,14 +1,15 @@
-import subprocess 
+import subprocess
 
-from langchain_core.tools import tool 
+from langchain_core.tools import tool
 
-MAX_OUTPUT_CHARS = 8000
+MAX_OUTPUT_CHARS = 4000
+
 
 @tool
 def run_shell_command(
-    command: str, 
-    cwd: str = None, 
-    timeout: int = 60
+    command: str,
+    cwd: str = None,
+    timeout: int = 60,
 ) -> str:
     """Execute a shell command and return its stdout, stderr, and exit code.
 
@@ -45,4 +46,3 @@ def run_shell_command(
     if result.stderr:
         parts.append(f"STDERR:\n{result.stderr[-MAX_OUTPUT_CHARS:]}")
     return "\n".join(parts)
-    

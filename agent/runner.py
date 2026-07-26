@@ -7,7 +7,7 @@ from langgraph.types import Command
 from .config import AgentConfig
 from .confirmation import default_cli_confirmation_handler
 from .graph import build_graph
-from .schemas import AgentResult, ConfirmationDecision, ConfirmationRequest
+from .schemas import AgentResult, ConfirmationDecision, ConfirmationRequest, ToolCallLog
 
 ConfirmHandler = Callable[[ConfirmationRequest], ConfirmationDecision]
 
@@ -40,11 +40,11 @@ def run_agent(
 ) -> AgentResult:
     """Run the agent to completion on a single prompt.
 
-    Any tool call to a confirmation-required tool (see ALWAYS_CONFIRM_TOOLS)
-    pauses execution and calls confirm_handler(request) to get a decision;
-    the default handler prompts on stdin. Pass your own handler to wire this
-    into a web UI, Slack, etc. — its only contract is
-    (ConfirmationRequest) -> ConfirmationDecision.
+    Any tool call to a confirmation-required tool (see
+    agent.confirmation.needs_confirmation) pauses execution and calls
+    confirm_handler(request) to get a decision; the default handler prompts
+    on stdin. Pass your own handler to wire this into a web UI, Slack, etc.
+    — its only contract is (ConfirmationRequest) -> ConfirmationDecision.
 
     thread_id lets you resume/continue a specific conversation later; a
     fresh one is generated if not given.
@@ -116,11 +116,14 @@ def run_agent(
     if status == "running":  # graph ended without anyone marking a terminal status
         status = "completed"
 
+    raw_tool_log = _field(final, "tool_log", []) or []
+    tool_calls = [d if isinstance(d, ToolCallLog) else ToolCallLog.model_validate(d) for d in raw_tool_log]
+
     return AgentResult(
         output=output if isinstance(output, str) else str(output),
         status=status,
         iterations=_field(final, "iterations", 0) or 0,
-        tool_calls=_field(final, "tool_log", []) or [],
+        tool_calls=tool_calls,
         thread_id=thread_id,
         error=_field(final, "error", None),
     )

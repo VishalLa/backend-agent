@@ -7,6 +7,23 @@ ALWAYS_CONFIRM_TOOLS = {
     "launch_background_process",
 }
 
+CONDITIONAL_CONFIRM_TOOLS = {
+    "write_file": lambda args: bool(args.get("overwrite")),
+}
+
+
+def needs_confirmation(tool_name: str, tool_args: dict) -> bool:
+    """True if this specific tool call requires human approval before running.
+
+    Checked per-call (not just per-tool-name) so conditional gates like
+    write_file's overwrite flag only trigger when the destructive argument
+    is actually set.
+    """
+    if tool_name in ALWAYS_CONFIRM_TOOLS:
+        return True
+    check = CONDITIONAL_CONFIRM_TOOLS.get(tool_name)
+    return bool(check and check(tool_args or {}))
+
 
 def default_cli_confirmation_handler(request: ConfirmationRequest) -> ConfirmationDecision:
     """Blocking CLI confirmation prompt.
@@ -33,4 +50,3 @@ def default_cli_confirmation_handler(request: ConfirmationRequest) -> Confirmati
     if answer in ("y", "yes"):
         return ConfirmationDecision(approved=True)
     return ConfirmationDecision(approved=False, reason="declined by user")
-    

@@ -42,13 +42,17 @@ class ConfirmationDecision(BaseModel):
 class AgentState(BaseModel):
     """LangGraph state schema. `messages` and `tool_log` accumulate across
     nodes (via reducers); everything else is overwritten by whichever node
-    last set it."""
+    last set it.
+
+    tool_log is list[dict] (ToolCallLog.model_dump() output) rather than
+    list[ToolCallLog] — see the note on ToolCallLog above for why.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     messages: Annotated[Sequence[BaseMessage], add_messages] = Field(default_factory=list)
     iterations: int = 0
-    tool_log: Annotated[list[ToolCallLog], operator.add] = Field(default_factory=list)
+    tool_log: Annotated[list[dict[str, Any]], operator.add] = Field(default_factory=list)
     status: Status = "running"
     error: Optional[str] = None
 
@@ -62,4 +66,3 @@ class AgentResult(BaseModel):
     tool_calls: list[ToolCallLog] = Field(default_factory=list)
     thread_id: str
     error: Optional[str] = None
-    

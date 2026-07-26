@@ -1,5 +1,8 @@
+import atexit
 import base64
 import queue
+import time
+import uuid
 from pathlib import Path
 
 from jupyter_client import KernelManager
@@ -15,6 +18,17 @@ def _get_kernel(project_id: str) -> KernelManager:
         km.start_kernel()
         _kernels[project_id] = km
     return _kernels[project_id]
+
+
+@atexit.register
+def _shutdown_all_kernels() -> None:
+    """Best-effort cleanup so kernel subprocesses don't linger as orphans
+    after the agent process exits. Registered once at import time."""
+    for km in list(_kernels.values()):
+        try:
+            km.shutdown_kernel(now=True)
+        except Exception:  # noqa: BLE001 - cleanup path, never raise on the way out
+            pass
 
 
 def _collect_outputs(kc, timeout: int) -> dict:
@@ -105,7 +119,8 @@ def execute_code(code: str, project_id: str = "default", timeout: int = 120) -> 
         IMAGE_DIR.mkdir(parents=True, exist_ok=True)
         saved = []
         for img_b64 in outputs["images"]:
-            img_path = IMAGE_DIR / f"{project_id}_{len(saved)}.png"
+            unique = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+            img_path = IMAGE_DIR / f"{project_id}_{unique}_{len(saved)}.png"
             img_path.write_bytes(base64.b64decode(img_b64))
             saved.append(str(img_path))
         parts.append(f"IMAGES SAVED: {', '.join(saved)}")
@@ -128,4 +143,3 @@ def restart_kernel(project_id: str = "default") -> str:
         del _kernels[project_id]
     _get_kernel(project_id)
     return f"OK: kernel '{project_id}' restarted"
-    
