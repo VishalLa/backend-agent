@@ -9,12 +9,19 @@ agent.confirmation.
 
 Model calls fall back automatically, in order: Groq -> OpenRouter (if
 OPENROUTER_API_KEY is set) -> local Ollama Qwen2.5-Coder (if enabled and
-`ollama serve` is running with the model pulled). Every tool call,
-confirmation decision, and LLM call/fallback is logged to config.log_file
-(default: agent_events.log) — use /logs to tail it from here.
+`ollama serve` is running with the model pulled) — unless provider_mode is
+'local', which talks to Ollama only.
+
+The PRIMARY model and active toolset depend on the task mode: 'backend'
+(Flask/FastAPI work, model: llama-3.3-70b-versatile) or 'ml' (ML/AI and
+data-analysis work, model: openai/gpt-oss-120b). Switch with /task — this
+is explicit, never inferred from what you type.
+
+Every tool call, confirmation decision, and LLM call/fallback is logged to
+config.log_file (default: agent_events.log) — use /logs to tail it here.
 
 Run from the project root (same level as main.py):
-    python main.py
+    python main.py [--provider api|local] [--task backend|ml]
 
 Optional, for nicer output:
     pip install rich
@@ -22,9 +29,9 @@ Optional, for nicer output:
 Commands:
     /new              start a fresh conversation (new thread id, clears context)
     /model <name>     switch the model for the rest of this session
+    /task [backend|ml]      switch task mode (primary model + active toolset)
     /provider [api|local]   switch between the API chain and local-only mode
-    /confirm-all [on|off]   require confirmation before EVERY tool call
-    /tools            list available tools
+    /tools            list tools active for the current task
     /history          show all tool calls made so far in this session
     /logs             tail the recent entries in the event log file
     /help             show this message
@@ -38,6 +45,7 @@ from pathlib import Path
 
 from agent import AgentConfig, run_agent
 from agent.logging_utils import log_event
+from agent.task_profiles import TASK_PROFILES, filter_tools_for_task
 from tools import ALL_TOOLS
 
 try:
@@ -56,12 +64,9 @@ HELP_TEXT = """
 Commands:
   /new              start a fresh conversation (new thread id, clears context)
   /model <name>     switch the model for the rest of this session
-  /provider [api|local]   switch between the API chain (Groq->OpenRouter->
-                    local fallback) and local-only mode (Ollama only)
-  /confirm-all [on|off]   require interactive confirmation before EVERY tool
-                    call (not just shell/delete/push/overwrite); no argument
-                    shows the current setting
-  /tools            list available tools
+  /task [backend|ml]      switch task mode (primary model + active toolset)
+  /provider [api|local]   switch between the API chain and local-only mode
+  /tools            list tools active for the current task
   /history          show all tool calls made so far in this session
   /logs             tail the recent entries in the event log file
   /help             show this message
@@ -104,9 +109,9 @@ def _print_tool_calls(tool_calls, title: str = "Tool calls this turn") -> None:
             print(f"[{flag}] {log.tool_name}({log.args}) -> {log.result[:150]}")
 
 
-def _list_tools() -> str:
+def _list_tools(tools_list) -> str:
     lines = []
-    for t in ALL_TOOLS:
+    for t in tools_list:
         first_line = (t.description or "").strip().splitlines()[0] if t.description else ""
         lines.append(f"- **{t.name}** — {first_line}")
     return "\n".join(lines)
@@ -137,6 +142,10 @@ def _tail_log(path: str, n: int = 25) -> str:
     return "```\n" + "\n".join(tail) + "\n```"
 
 
+def _task_model(config: AgentConfig, task_mode: str) -> str:
+    return config.backend_model_name if task_mode == "backend" else config.ml_model_name
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Local coding agent REPL")
     parser.add_argument(
@@ -146,11 +155,11 @@ def main() -> None:
              "var, or 'api'.",
     )
     parser.add_argument(
-        "--confirm-all", action="store_true",
-        help="Require interactive confirmation before every tool call, not just "
-             "destructive ones (shell/delete/git push/background jobs/file overwrite). "
-             "Can also be toggled mid-session with /confirm-all on|off, or set "
-             "persistently via AGENT_CONFIRM_ALL_TOOLS=true.",
+        "--task", choices=["backend", "ml"], default=None,
+        help="Force task mode (primary model + active toolset) for this session: "
+             "'backend' (Flask/FastAPI, model: llama-3.3-70b-versatile) or 'ml' "
+             "(ML/AI + data workflows, model: openai/gpt-oss-120b). Defaults to "
+             "AGENT_TASK_MODE env var, or 'backend'.",
     )
     args = parser.parse_args()
 
@@ -167,8 +176,8 @@ def main() -> None:
             print(f"Invalid --provider value: {e}")
             sys.exit(1)
 
-    if args.confirm_all:
-        config = config.model_copy(update={"confirm_all_tools": True})
+    if args.task:
+        config = config.model_copy(update={"task_mode": args.task, "model_name": _task_model(config, args.task)})
 
     if config.provider_mode == "local" and not config.enable_ollama_fallback:
         print(
@@ -178,14 +187,18 @@ def main() -> None:
         )
         sys.exit(1)
 
+    active_tools = filter_tools_for_task(config.task_mode, ALL_TOOLS)
+
     thread_id = str(uuid.uuid4())
     session_tool_log: list = []
 
+    task_desc = TASK_PROFILES.get(config.task_mode, {}).get("description", config.task_mode)
     _print_panel(
         "Local Coding Agent",
+        f"task: **{config.task_mode}**  ({task_desc})\n"
         f"model chain: {_fallback_summary(config)}\n"
-        f"thread: `{thread_id[:8]}`  |  log: `{config.log_file}`  |  "
-        f"confirm-all: `{'ON' if config.confirm_all_tools else 'OFF'}`\n\n"
+        f"tools: {len(active_tools)} active for this task (of {len(ALL_TOOLS)} total)\n"
+        f"thread: `{thread_id[:8]}`  |  log: `{config.log_file}`\n\n"
         "Type `/help` for commands, or just describe a task.",
     )
 
@@ -213,7 +226,7 @@ def main() -> None:
             _print(f"started a new conversation: {thread_id[:8]}")
             continue
 
-        if user_input.startswith("/model"):
+        if user_input == "/model" or user_input.startswith("/model "):
             parts = user_input.split(maxsplit=1)
             if len(parts) == 2 and parts[1].strip():
                 try:
@@ -225,7 +238,33 @@ def main() -> None:
                 _print(f"current model chain: {_fallback_summary(config)}")
             continue
 
-        if user_input.startswith("/provider"):
+        if user_input == "/task" or user_input.startswith("/task "):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) == 2 and parts[1].strip().lower() in ("backend", "ml"):
+                new_task = parts[1].strip().lower()
+                new_model = _task_model(config, new_task)
+                config = config.model_copy(update={"task_mode": new_task, "model_name": new_model})
+                active_tools = filter_tools_for_task(new_task, ALL_TOOLS)
+                log_event(
+                    config.log_file, "task_mode_changed", thread_id=thread_id,
+                    task_mode=new_task, model_name=new_model, tool_count=len(active_tools),
+                )
+                desc = TASK_PROFILES.get(new_task, {}).get("description", new_task)
+                _print(
+                    f"task mode switched to: {new_task}  ({desc})\n"
+                    f"model: {new_model}\n"
+                    f"active tools ({len(active_tools)}): {', '.join(t.name for t in active_tools)}"
+                )
+            else:
+                desc = TASK_PROFILES.get(config.task_mode, {}).get("description", config.task_mode)
+                _print(
+                    f"current task mode: {config.task_mode}  ({desc})\n"
+                    f"model: {config.model_name}\n\n"
+                    "usage: /task backend | /task ml"
+                )
+            continue
+
+        if user_input == "/provider" or user_input.startswith("/provider "):
             parts = user_input.split(maxsplit=1)
             if len(parts) == 2 and parts[1].strip().lower() in ("api", "local"):
                 new_mode = parts[1].strip().lower()
@@ -247,27 +286,11 @@ def main() -> None:
                 _print(f"current provider mode: {config.provider_mode}\n{_fallback_summary(config)}\n\nusage: /provider api | /provider local")
             continue
 
-        if user_input.startswith("/confirm-all"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) == 2 and parts[1].strip().lower() in ("on", "off"):
-                new_val = parts[1].strip().lower() == "on"
-                old_val = config.confirm_all_tools
-                config = config.model_copy(update={"confirm_all_tools": new_val})
-                log_event(
-                    config.log_file, "confirm_all_tools_changed", thread_id=thread_id,
-                    from_value=old_val, to_value=new_val,
-                )
-                if new_val:
-                    _print("confirm-all: ON — every tool call (including reads/searches) will ask for approval first.")
-                else:
-                    _print("confirm-all: OFF — only destructive tools (shell/delete/git push/background jobs/file overwrite) need approval.")
-            else:
-                state = "ON" if config.confirm_all_tools else "OFF"
-                _print(f"confirm-all is currently: {state}\n\nusage: /confirm-all on | /confirm-all off")
-            continue
-
         if user_input == "/tools":
-            _print_panel("Available tools", _list_tools())
+            _print_panel(
+                f"Active tools — task: {config.task_mode} ({len(active_tools)} of {len(ALL_TOOLS)} total)",
+                _list_tools(active_tools),
+            )
             continue
 
         if user_input == "/history":
@@ -283,7 +306,10 @@ def main() -> None:
             continue
 
         try:
-            result = run_agent(user_input, config=config, thread_id=thread_id, tools=ALL_TOOLS)
+            result = run_agent(user_input, config=config, thread_id=thread_id, tools=active_tools)
+        except KeyboardInterrupt:
+            _print("\n[cancelled — Ctrl-C during this turn; back at the prompt]", style="yellow")
+            continue
         except Exception as e:  # noqa: BLE001 - last-resort net so a bad turn doesn't kill the REPL
             _print(f"agent run crashed: {e}", style="red")
             continue
@@ -294,14 +320,13 @@ def main() -> None:
 
         if result.status == "error":
             _print(f"[status: error] {result.error}", style="red")
+        elif result.status == "cancelled":
+            _print(f"[status: cancelled] {result.error or 'cancelled by user (Ctrl-C)'}", style="yellow")
         elif result.status == "max_iterations_reached":
             _print(f"[status: stopped — hit max_iterations ({config.max_iterations})]", style="yellow")
         elif result.status == "completed_with_errors":
-            last_failed = next((tc for tc in reversed(result.tool_calls) if not tc.success), None)
-            detail = f" last failed call: {last_failed.tool_name} -> {last_failed.result[:150]}" if last_failed else ""
-            _print(f"[status: completed, but the last tool call failed — double-check the result.{detail}]", style="yellow")
+            _print("[status: completed, but the last tool call failed — check the output above]", style="yellow")
 
 
 if __name__ == "__main__":
     main()
-    

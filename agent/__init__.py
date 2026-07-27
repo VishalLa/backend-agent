@@ -12,6 +12,7 @@ from .config import AgentConfig
 from .confirmation import ALWAYS_CONFIRM_TOOLS, default_cli_confirmation_handler
 from .runner import run_agent
 from .schemas import AgentResult, AgentState, ConfirmationDecision, ConfirmationRequest, ToolCallLog
+from .task_profiles import TASK_PROFILES, filter_tools_for_task
 
 __all__ = [
     "AgentConfig",
@@ -23,4 +24,6 @@ __all__ = [
     "ALWAYS_CONFIRM_TOOLS",
     "default_cli_confirmation_handler",
     "run_agent",
+    "TASK_PROFILES",
+    "filter_tools_for_task",
 ]

@@ -5,7 +5,6 @@ import uuid
 from typing import Any, Literal, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import interrupt
@@ -25,10 +24,17 @@ RETRYABLE_ERROR_MARKERS = (
     "timeout",
     "timed out",
     "connection",
+    "disconnected",
+    "connection refused",
+    "broken pipe",
+    "remote protocol error",
     "502",
     "503",
     "overloaded",
 )
+
+LOCAL_SERVER_STARTUP_MARKERS = ("disconnected", "connection refused", "broken pipe", "remote protocol error")
+LOCAL_SERVER_COLD_START_WAIT_SECONDS = 15.0
 CONTEXT_LENGTH_MARKERS = (
     "context length",
     "context_length",
@@ -39,6 +45,14 @@ CONTEXT_LENGTH_MARKERS = (
     "413",
 )
 
+TOKEN_RATE_LIMIT_MARKERS = (
+    "tokens per minute",
+    "requests per minute",
+    "tpm",
+    "rpm)",
+    "rate_limit_exceeded",
+)
+
 TOOL_NAME_ERROR_MARKERS = (
     "not in request.tools",
     "tool_use_failed",
@@ -46,6 +60,14 @@ TOOL_NAME_ERROR_MARKERS = (
 )
 MAX_TOOL_HALLUCINATION_RETRIES = 2
 MAX_EMPTY_RESPONSE_RETRIES = 2
+
+
+READ_ONLY_TOOL_NAMES = {
+    "read_file", "list_dir", "ripgrep_search", "git_status", "git_diff",
+    "git_log", "git_branch", "web_search", "check_gpu_status", "tail_log",
+    "fetch_openapi_schema", "http_request",
+}
+STAGNATION_REPEAT_THRESHOLD = 3
 
 _RETRY_AFTER_RE = re.compile(r"try again in\s+([\d.]+)\s*s", re.IGNORECASE)
 MAX_RATE_LIMIT_WAIT_SECONDS = 90.0
@@ -61,12 +83,29 @@ def _parse_retry_after(msg: str) -> Optional[float]:
         return None
 
 
-def _thread_id(run_config: Optional[dict]) -> str:
-    """Pull thread_id out of the RunnableConfig LangGraph injects into any
-    node function whose signature accepts a second argument."""
+try:
+    from langgraph.config import get_config as _lg_get_config
+except ImportError:
+    def _lg_get_config() -> dict:
+        return {}
+
+
+def _thread_id() -> str:
+    """Current run's thread_id, read from LangGraph's own contextvar-based
+    config accessor rather than an injected node-function parameter.
+
+    Node functions can optionally accept a second parameter to receive the
+    RunnableConfig, but LangGraph versions differ on whether it's passed
+    positionally or as a keyword, and don't guarantee a specific parameter
+    name is required — a mismatch there is a real "missing required
+    argument" / "unexpected keyword argument" crash risk. get_config()
+    reads directly from the contextvar LangGraph sets around every node
+    call, independent of the node's own signature, so it works the same way
+    regardless of that calling convention."""
     try:
-        return (run_config or {}).get("configurable", {}).get("thread_id", "unknown")
-    except Exception:  # noqa: BLE001
+        cfg = _lg_get_config()
+        return (cfg or {}).get("configurable", {}).get("thread_id", "unknown")
+    except Exception:  # noqa: BLE001 - logging/id lookup must never break the run
         return "unknown"
 
 
@@ -160,11 +199,44 @@ SYSTEM_PROMPT = (
 )
 
 
-def _truncate(text: object, limit: int = MAX_TOOL_OUTPUT_CHARS) -> str:
+def _truncate(text: object, limit: int = MAX_TOOL_OUTPUT_CHARS, continuation_hint_tool: Optional[str] = None) -> str:
+    """Truncate long tool output before it goes back to the model.
+
+    For read_file specifically, a flat character cutoff with no pointer back
+    into the file causes two distinct real failure modes seen in practice:
+    a model that can't tell it only saw a partial file may either (a) keep
+    re-reading with guessed-larger end_line values forever, since every read
+    from line 1 returns the identical truncated head regardless of the range
+    requested, or worse (b) treat the truncated slice as the whole file,
+    make a correct-looking but tiny edit confined to what it could see, and
+    report the (much larger) task as done. read_file's own output is
+    formatted as "<line_number>\\t<content>" per line (seen consistently in
+    practice), so we can parse the last fully-visible line number out of the
+    truncated text and tell the model exactly where to resume — turning a
+    silent, ambiguous cutoff into an explicit, actionable pointer.
+    """
     text = "" if text is None else str(text)
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
+    truncated = text[:limit]
+    suffix = f"\n... [truncated {len(text) - limit} chars]"
+    if continuation_hint_tool == "read_file":
+        last_newline = truncated.rfind("\n")
+        last_line = truncated[last_newline + 1 :] if last_newline != -1 else truncated
+        m = re.match(r"(\d+)\t", last_line)
+        if m:
+            next_line = int(m.group(1)) + 1
+            suffix += (
+                f" — this file continues past line {m.group(1)}. It is NOT fully shown above; "
+                f"call read_file again with start_line={next_line} to keep reading before editing "
+                "or claiming the file is fully updated."
+            )
+        else:
+            suffix += (
+                " — this output was cut off and may not represent the full file/result; "
+                "re-read with a later start_line if you need the rest before editing."
+            )
+    return truncated + suffix
 
 
 MAX_TOOL_CALL_ARG_CHARS = 300
@@ -237,6 +309,43 @@ def _last_ai_message_with_tool_calls(messages: list[BaseMessage]):
     return None
 
 
+def _detect_read_only_stagnation(tool_log: list, threshold: int = STAGNATION_REPEAT_THRESHOLD) -> Optional[str]:
+    """If the last `threshold` tool calls were all the same read-only tool
+    against the same target (its `path` arg, when present) with no mutating
+    call in between, the model is very likely stuck probing rather than
+    making progress — e.g. re-reading a file with different line ranges
+    instead of ever calling edit_file/write_file. Returns a corrective nudge
+    to append to model_input, or None if nothing looks stuck.
+
+    Deliberately narrow (exact same tool + same target, back-to-back) to
+    avoid false positives on legitimate multi-file exploration — reading
+    several different files in a row is normal and untouched by this check.
+    """
+    if len(tool_log) < threshold:
+        return None
+    recent = tool_log[-threshold:]
+    names = {d.get("tool_name") for d in recent}
+    if len(names) != 1:
+        return None
+    (name,) = names
+    if name not in READ_ONLY_TOOL_NAMES:
+        return None
+    targets = {(d.get("args") or {}).get("path") for d in recent}
+    if len(targets) != 1:
+        return None
+    (target,) = targets
+    where = f" on `{target}`" if target else ""
+    return (
+        f"SYSTEM: you've called '{name}'{where} {threshold} times in a row without making "
+        "any change. You already have enough context from these reads — make the edit now "
+        "with edit_file or write_file, or if you're genuinely blocked (e.g. the file looks "
+        "inconsistent/corrupted), say so plainly instead of reading it again."
+    )
+
+
+_SHARED_CHECKPOINTER = InMemorySaver()
+
+
 def build_graph(agent_config: AgentConfig, tools: list):
     """Compile the agent graph for a given config + toolset. Call once per
     process per (config, toolset) pair — the graph object itself is cheap to
@@ -253,8 +362,11 @@ def build_graph(agent_config: AgentConfig, tools: list):
 
     # ---- nodes -------------------------------------------------------
 
-    def agent_node(state: AgentState, config: RunnableConfig) -> dict:
-        thread_id = _thread_id(config)
+    def agent_node(state: AgentState) -> dict:
+        thread_id = _thread_id()
+
+        if state.status in ("cancelled", "error", "max_iterations_reached"):
+            return {}
 
         # Loop guard: stop calling the model once we've hit the cap.
         if state.iterations >= agent_config.max_iterations:
@@ -275,11 +387,19 @@ def build_graph(agent_config: AgentConfig, tools: list):
             messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
         model_input = _prepare_messages_for_model(messages)
 
+        stagnation_nudge = _detect_read_only_stagnation(state.tool_log)
+        if stagnation_nudge:
+            log_event(
+                agent_config.log_file, "llm_read_only_stagnation_detected", thread_id=thread_id,
+                tool_name=(state.tool_log[-1] or {}).get("tool_name") if state.tool_log else None,
+            )
+            model_input = model_input + [HumanMessage(content=stagnation_nudge)]
+
         last_error: Optional[Exception] = None
-        rate_limit_retries_left = 3
+        retries_left = agent_config.max_retries
+        retries_used = 0
         tool_hallucination_retries_left = MAX_TOOL_HALLUCINATION_RETRIES
         empty_response_retries_left = MAX_EMPTY_RESPONSE_RETRIES
-        attempt = 0
         while True:
             try:
                 response = llm_with_tools.invoke(model_input)
@@ -323,10 +443,20 @@ def build_graph(agent_config: AgentConfig, tools: list):
                     provider=_identify_provider(response, agent_config),
                 )
                 return {"messages": [response], "iterations": state.iterations + 1}
+            except KeyboardInterrupt:
+                log_event(agent_config.log_file, "llm_call_cancelled", thread_id=thread_id)
+                return {
+                    "messages": [AIMessage(content="Cancelled (Ctrl-C) while waiting on the model.")],
+                    "iterations": state.iterations + 1,
+                    "status": "cancelled",
+                    "error": "cancelled by user (Ctrl-C) during LLM call",
+                }
             except Exception as e:  # noqa: BLE001 - provider errors are heterogeneous by design
                 last_error = e
                 msg = str(e).lower()
-                if any(marker in msg for marker in CONTEXT_LENGTH_MARKERS):
+                is_token_rate_limit = any(marker in msg for marker in TOKEN_RATE_LIMIT_MARKERS)
+
+                if any(marker in msg for marker in CONTEXT_LENGTH_MARKERS) and not is_token_rate_limit:
                     log_event(
                         agent_config.log_file, "llm_call_failed", thread_id=thread_id,
                         reason="context_too_large", error=str(e),
@@ -368,21 +498,36 @@ def build_graph(agent_config: AgentConfig, tools: list):
                     # retries exhausted — fall through to the generic failure path below
 
                 retry_after = _parse_retry_after(msg)
-                is_rate_limit = retry_after is not None or "rate_limit" in msg or "rate limit" in msg
-                is_retryable = is_rate_limit or any(marker in msg for marker in RETRYABLE_ERROR_MARKERS)
+                is_rate_limit = (
+                    retry_after is not None or "rate_limit" in msg or "rate limit" in msg or is_token_rate_limit
+                )
+                is_local_server_hiccup = agent_config.provider_mode == "local" and any(
+                    marker in msg for marker in LOCAL_SERVER_STARTUP_MARKERS
+                )
+                is_retryable = (
+                    is_rate_limit or is_local_server_hiccup or any(marker in msg for marker in RETRYABLE_ERROR_MARKERS)
+                )
 
-                if is_rate_limit and rate_limit_retries_left > 0:
+                if not is_retryable or retries_left <= 0:
+                    break
+
+                if is_rate_limit:
                     wait = min((retry_after or agent_config.retry_backoff_seconds) + 0.5, MAX_RATE_LIMIT_WAIT_SECONDS)
                     print(f"[rate limited — waiting {wait:.1f}s before retrying the model call]")
                     log_event(agent_config.log_file, "llm_rate_limited_wait", thread_id=thread_id, wait_seconds=wait)
                     time.sleep(wait)
-                    rate_limit_retries_left -= 1
-                    continue
+                elif is_local_server_hiccup:
+                    wait = LOCAL_SERVER_COLD_START_WAIT_SECONDS * (retries_used + 1)
+                    print(f"[local model server not responding yet (still loading?) — waiting {wait:.1f}s before retrying]")
+                    log_event(
+                        agent_config.log_file, "llm_local_server_cold_start_wait", thread_id=thread_id, wait_seconds=wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    time.sleep(agent_config.retry_backoff_seconds * (2**retries_used))
 
-                if not is_retryable or attempt >= agent_config.max_retries:
-                    break
-                time.sleep(agent_config.retry_backoff_seconds * (2**attempt))
-                attempt += 1
+                retries_left -= 1
+                retries_used += 1
 
         log_event(
             agent_config.log_file, "llm_call_failed", thread_id=thread_id,
@@ -403,9 +548,35 @@ def build_graph(agent_config: AgentConfig, tools: list):
             "error": str(last_error),
         }
 
+    def _dedup_and_validate_tool_calls(tool_calls: list, thread_id: str) -> list:
+        """Filter out malformed tool calls (missing id/name — not impossible
+        from a weaker fallback tier producing an oddly-shaped response) and
+        drop duplicate call_ids (a model emitting the same call twice would
+        otherwise execute it twice and produce two ToolMessages with the
+        same tool_call_id, which some providers reject on the next turn).
+        Never raises — problems here are dropped and logged, not a crash."""
+        seen_ids: set = set()
+        valid = []
+        for tc in tool_calls:
+            call_id = tc.get("id")
+            name = tc.get("name")
+            if not call_id or not name:
+                log_event(agent_config.log_file, "tool_call_malformed", thread_id=thread_id, raw=str(tc)[:300])
+                continue
+            if call_id in seen_ids:
+                log_event(
+                    agent_config.log_file, "tool_call_duplicate_id", thread_id=thread_id,
+                    tool_name=name, call_id=call_id,
+                )
+                continue
+            seen_ids.add(call_id)
+            valid.append(tc)
+        return valid
+
     def confirm_node(state: AgentState) -> dict:
+        thread_id = _thread_id()
         last_ai = _last_ai_message_with_tool_calls(list(state.messages))
-        tool_calls = last_ai.tool_calls if last_ai else []
+        tool_calls = _dedup_and_validate_tool_calls(last_ai.tool_calls if last_ai else [], thread_id)
 
         pending: list[ConfirmationRequest] = []
         for tc in tool_calls:
@@ -441,15 +612,16 @@ def build_graph(agent_config: AgentConfig, tools: list):
                 )
         return {"messages": new_messages} if new_messages else {}
 
-    def tools_node(state: AgentState, config: RunnableConfig) -> dict:
-        thread_id = _thread_id(config)
+    def tools_node(state: AgentState) -> dict:
+        thread_id = _thread_id()
         messages = list(state.messages)
         last_ai = _last_ai_message_with_tool_calls(messages)
-        tool_calls = last_ai.tool_calls if last_ai else []
+        tool_calls = _dedup_and_validate_tool_calls(last_ai.tool_calls if last_ai else [], thread_id)
         answered = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
 
         new_messages: list[BaseMessage] = []
         logs: list[dict] = []
+        cancelled = False
         for tc in tool_calls:
             call_id = tc["id"]
             name = tc["name"]
@@ -472,8 +644,26 @@ def build_graph(agent_config: AgentConfig, tools: list):
             else:
                 try:
                     raw_output = tool.invoke(args)
-                    output = _truncate(raw_output)
+                    output = _truncate(raw_output, continuation_hint_tool=name)
                     success = not (isinstance(raw_output, str) and raw_output.startswith(("ERROR", "BLOCKED")))
+                except KeyboardInterrupt:
+                    # Ctrl-C during a slow tool call (long shell command, Jupyter
+                    # cell, etc). Not an Exception subclass, so the `except
+                    # Exception` below would have missed it and let it crash the
+                    # REPL. Record this call as cancelled and stop the batch —
+                    # don't keep firing off further tool calls after a cancel.
+                    output = "CANCELLED: interrupted by user (Ctrl-C) while this tool was running."
+                    success = False
+                    new_messages.append(ToolMessage(content=output, tool_call_id=call_id, name=name))
+                    logs.append(
+                        ToolCallLog(
+                            call_id=call_id, tool_name=name, args=args, result=output,
+                            confirmed=True, success=success,
+                        ).model_dump()
+                    )
+                    log_event(agent_config.log_file, "tool_call_cancelled", thread_id=thread_id, tool_name=name)
+                    cancelled = True
+                    break
                 except Exception as e:  # noqa: BLE001 - bad args, tool bugs, etc. must not crash the graph
                     output = f"ERROR: tool '{name}' raised an exception: {e}"
                     success = False
@@ -489,15 +679,20 @@ def build_graph(agent_config: AgentConfig, tools: list):
                 args=safe_args(args), success=success, result=output[:500],
             )
 
-        return {"messages": new_messages, "tool_log": logs}
+        result: dict = {"messages": new_messages, "tool_log": logs}
+        if cancelled:
+            result["status"] = "cancelled"
+            result["error"] = "cancelled by user (Ctrl-C) during a tool call"
+        return result
 
     # ---- routing -------------------------------------------------------
 
     def route_after_agent(state: AgentState) -> Literal["confirm", "tools", "__end__"]:
-        if state.status in ("max_iterations_reached", "error"):
+        if state.status in ("max_iterations_reached", "error", "cancelled"):
             return "__end__"
         last = state.messages[-1] if state.messages else None
-        tool_calls = getattr(last, "tool_calls", None) or []
+        raw_tool_calls = getattr(last, "tool_calls", None) or []
+        tool_calls = _dedup_and_validate_tool_calls(raw_tool_calls, _thread_id())
         if not tool_calls:
             return "__end__"
         if any(needs_confirmation(tc["name"], tc.get("args", {}) or {}, agent_config.confirm_all_tools) for tc in tool_calls):
@@ -516,5 +711,4 @@ def build_graph(agent_config: AgentConfig, tools: list):
     builder.add_edge("confirm", "tools")
     builder.add_edge("tools", "agent")
 
-    checkpointer = InMemorySaver()
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(checkpointer=_SHARED_CHECKPOINTER)

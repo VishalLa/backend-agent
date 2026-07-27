@@ -9,6 +9,7 @@ from .confirmation import default_cli_confirmation_handler
 from .graph import build_graph
 from .logging_utils import DEFAULT_LOG_FILE, log_event
 from .schemas import AgentResult, ConfirmationDecision, ConfirmationRequest, ToolCallLog
+from .task_profiles import filter_tools_for_task
 
 ConfirmHandler = Callable[[ConfirmationRequest], ConfirmationDecision]
 
@@ -85,7 +86,7 @@ def run_agent(
                 thread_id=thread_id,
                 error=f"couldn't import tools.ALL_TOOLS ({e}); pass tools= explicitly or fix PYTHONPATH",
             )
-        tools = ALL_TOOLS
+        tools = filter_tools_for_task(config.task_mode, ALL_TOOLS)
 
     confirm_handler = confirm_handler or default_cli_confirmation_handler
 
@@ -110,7 +111,6 @@ def run_agent(
                 # Defensive: paused with nothing to resume. Shouldn't happen,
                 # but bail cleanly instead of looping forever.
                 break
-
 
             raw_requests = snapshot.tasks[0].interrupts[0].value
             if not isinstance(raw_requests, list):
@@ -172,4 +172,3 @@ def run_agent(
         iterations=result.iterations, tool_call_count=len(result.tool_calls), error=result.error,
     )
     return result
-
