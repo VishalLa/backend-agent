@@ -14,11 +14,11 @@ OPENROUTER_HEADERS = {
 }
 
 
-def _build_primary(config: AgentConfig) -> ChatOpenAI:
+def _build_sambanova(config: AgentConfig) -> ChatOpenAI:
     return ChatOpenAI(
         model=config.model_name,
-        api_key=config.groq_api_key.get_secret_value(),
-        base_url=config.groq_base_url,
+        api_key=config.sambanova_api_key.get_secret_value(),
+        base_url=config.sambanova_base_url,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         timeout=config.request_timeout,
@@ -42,6 +42,21 @@ def _build_openrouter(config: AgentConfig) -> Optional[ChatOpenAI]:
     )
 
 
+def _build_groq(config: AgentConfig) -> Optional[ChatOpenAI]:
+    key = config.groq_key_str()
+    if not key:
+        return None
+    return ChatOpenAI(
+        model=config.groq_model_name,
+        api_key=key,
+        base_url=config.groq_base_url,
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        timeout=config.request_timeout,
+        max_retries=0,
+    )
+
+
 def _build_ollama(config: AgentConfig) -> Optional[ChatOllama]:
     if not config.enable_ollama_fallback:
         return None
@@ -52,6 +67,7 @@ def _build_ollama(config: AgentConfig) -> Optional[ChatOllama]:
         num_predict=config.ollama_num_predict,
         num_ctx=config.ollama_num_ctx,
         keep_alive=config.ollama_keep_alive,
+        client_kwargs={"timeout": config.ollama_request_timeout},
     )
     if config.ollama_num_thread is not None:
         kwargs["num_thread"] = config.ollama_num_thread
@@ -62,15 +78,8 @@ def _fallback_chain(config: AgentConfig, tools: Optional[list]) -> Any:
     """Build the runnable for this config, respecting config.provider_mode:
 
     - "local": bypass the API chain entirely and talk to Ollama directly.
-      Raises a clear error if Ollama fallback isn't enabled, rather than
-      silently falling through to an API call the user explicitly opted out of.
-    - "api" (default): the full chain — primary (Groq) -> OpenRouter (if an
-      API key is configured) -> local Ollama Qwen2.5-Coder (if enabled) as
-      the last resort if every API tier is unavailable or exhausted.
-
-    Tools are bound to each tier individually BEFORE chaining fallbacks —
-    bind_tools() then with_fallbacks(), not the reverse — so every tier that
-    gets used can actually call tools.
+    - "api" (default): the full chain — primary (SambaNova) -> OpenRouter -> Groq 
+      -> local Ollama Qwen2.5-Coder (if enabled) as the last resort.
     """
     if config.provider_mode == "local":
         ollama = _build_ollama(config)
@@ -82,18 +91,21 @@ def _fallback_chain(config: AgentConfig, tools: Optional[list]) -> Any:
             )
         return ollama.bind_tools(tools) if tools else ollama
 
-    primary = _build_primary(config)
+    primary = _build_sambanova(config)
     openrouter = _build_openrouter(config)
+    groq = _build_groq(config)
     ollama = _build_ollama(config)
 
     if tools:
         primary = primary.bind_tools(tools)
         if openrouter is not None:
             openrouter = openrouter.bind_tools(tools)
+        if groq is not None:
+            groq = groq.bind_tools(tools)
         if ollama is not None:
             ollama = ollama.bind_tools(tools)
 
-    fallbacks = [m for m in (openrouter, ollama) if m is not None]
+    fallbacks = [m for m in (openrouter, groq, ollama) if m is not None]
     return primary.with_fallbacks(fallbacks) if fallbacks else primary
 
 
@@ -102,13 +114,16 @@ def _cache_key(config: AgentConfig, extra: tuple = ()) -> tuple:
         config.provider_mode,
         config.model_name,
         config.fallback_model_name,
+        config.groq_model_name,
         config.ollama_model,
         config.enable_ollama_fallback,
         config.ollama_num_ctx,
         config.ollama_num_predict,
         config.ollama_keep_alive,
         config.ollama_num_thread,
+        config.ollama_request_timeout,
         config.openrouter_key_str() != "",
+        config.groq_key_str() != "",
         config.temperature,
         config.max_tokens,
         config.request_timeout,
@@ -117,7 +132,7 @@ def _cache_key(config: AgentConfig, extra: tuple = ()) -> tuple:
 
 def get_llm(config: AgentConfig) -> Any:
     """Return a shared LLM runnable (no tools bound) with the full
-    Groq -> OpenRouter -> local Ollama fallback chain."""
+    SambaNova -> OpenRouter -> Groq -> local Ollama fallback chain."""
     cache_key = _cache_key(config)
     if cache_key not in _llm_cache:
         _llm_cache[cache_key] = _fallback_chain(config, tools=None)
@@ -138,3 +153,4 @@ def reset_llm_cache() -> None:
     """Clear cached clients. Mainly useful in tests."""
     _llm_cache.clear()
     _llm_with_tools_cache.clear()
+    

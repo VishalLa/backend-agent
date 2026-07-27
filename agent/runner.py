@@ -28,10 +28,11 @@ def _field(obj: Any, name: str, default: Any = None) -> Any:
 def _get_or_build_graph(config: AgentConfig, tools: list):
     tool_names = tuple(sorted(t.name for t in tools))
     cache_key = (
-        config.provider_mode, config.model_name, config.fallback_model_name, config.ollama_model,
-        config.enable_ollama_fallback, config.ollama_num_ctx, config.ollama_num_predict,
-        config.ollama_keep_alive, config.ollama_num_thread,
-        config.temperature, config.max_tokens, config.confirm_all_tools, tool_names,
+        config.provider_mode, config.model_name, config.fallback_model_name, config.groq_model_name, 
+        config.ollama_model, config.enable_ollama_fallback, config.ollama_num_ctx, 
+        config.ollama_num_predict, config.ollama_keep_alive, config.ollama_num_thread, 
+        config.ollama_request_timeout, config.temperature, config.max_tokens, 
+        config.confirm_all_tools, tool_names,
     )
     if cache_key not in _graph_cache:
         _graph_cache[cache_key] = build_graph(config, tools)
@@ -45,22 +46,7 @@ def run_agent(
     confirm_handler: Optional[ConfirmHandler] = None,
     thread_id: Optional[str] = None,
 ) -> AgentResult:
-    """Run the agent to completion on a single prompt.
-
-    Any tool call to a confirmation-required tool (see
-    agent.confirmation.needs_confirmation) pauses execution and calls
-    confirm_handler(request) to get a decision; the default handler prompts
-    on stdin. Pass your own handler to wire this into a web UI, Slack, etc.
-    — its only contract is (ConfirmationRequest) -> ConfirmationDecision.
-
-    thread_id lets you resume/continue a specific conversation later; a
-    fresh one is generated if not given.
-
-    Every meaningful step of this run (start, each LLM call and which
-    provider tier answered, each tool call, confirmation decisions, and the
-    final outcome) is appended to config.log_file as JSON lines — see
-    agent.logging_utils.log_event for the schema.
-    """
+    """Run the agent to completion on a single prompt."""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
 

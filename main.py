@@ -7,9 +7,9 @@ Confirmation prompts (shell commands, deletes, git push, background jobs,
 overwriting files) still go through the normal stdin y/N handler from
 agent.confirmation.
 
-Model calls fall back automatically, in order: Groq -> OpenRouter (if
-OPENROUTER_API_KEY is set) -> local Ollama Qwen2.5-Coder (if enabled and
-`ollama serve` is running with the model pulled) — unless provider_mode is
+Model calls fall back automatically, in order: SambaNova -> OpenRouter 
+(if OPENROUTER_API_KEY is set) -> Groq (if GROQ_API_KEY is set) -> local Ollama
+Qwen2.5-Coder (if enabled and `ollama serve` is running) — unless provider_mode is
 'local', which talks to Ollama only.
 
 The PRIMARY model and active toolset depend on the task mode: 'backend'
@@ -120,11 +120,13 @@ def _list_tools(tools_list) -> str:
 def _fallback_summary(config: AgentConfig) -> str:
     if config.provider_mode == "local":
         return f"local-only: Ollama ({config.ollama_model})  [mode: local]"
-    tiers = [f"1. Groq ({config.model_name})"]
+    tiers = [f"1. SambaNova ({config.model_name})"]
     if config.openrouter_key_str():
         tiers.append(f"2. OpenRouter ({config.fallback_model_name})")
+    if config.groq_key_str():
+        tiers.append(f"3. Groq ({config.groq_model_name})")
     if config.enable_ollama_fallback:
-        tiers.append(f"3. Local Ollama ({config.ollama_model}) — last resort")
+        tiers.append(f"4. Local Ollama ({config.ollama_model}) — last resort")
     chain = " → ".join(tiers) if len(tiers) > 1 else f"{tiers[0]}  (no fallback tiers configured)"
     return f"{chain}  [mode: api]"
 
@@ -150,7 +152,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Local coding agent REPL")
     parser.add_argument(
         "--provider", choices=["api", "local"], default=None,
-        help="Force provider mode for this session: 'api' (Groq->OpenRouter->local "
+        help="Force provider mode for this session: 'api' (SambaNova->OpenRouter->Groq->local "
              "fallback) or 'local' (Ollama only). Defaults to AGENT_PROVIDER_MODE env "
              "var, or 'api'.",
     )

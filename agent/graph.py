@@ -91,27 +91,14 @@ except ImportError:
 
 
 def _thread_id() -> str:
-    """Current run's thread_id, read from LangGraph's own contextvar-based
-    config accessor rather than an injected node-function parameter.
-
-    Node functions can optionally accept a second parameter to receive the
-    RunnableConfig, but LangGraph versions differ on whether it's passed
-    positionally or as a keyword, and don't guarantee a specific parameter
-    name is required — a mismatch there is a real "missing required
-    argument" / "unexpected keyword argument" crash risk. get_config()
-    reads directly from the contextvar LangGraph sets around every node
-    call, independent of the node's own signature, so it works the same way
-    regardless of that calling convention."""
     try:
         cfg = _lg_get_config()
         return (cfg or {}).get("configurable", {}).get("thread_id", "unknown")
-    except Exception:  # noqa: BLE001 - logging/id lookup must never break the run
+    except Exception:  # noqa: BLE001
         return "unknown"
 
 
 def _find_json_object(text: str) -> Optional[str]:
-    """Find the first balanced {...} substring in text (brace-counting, so
-    it handles nested braces correctly, unlike a naive regex)."""
     start = text.find("{")
     if start == -1:
         return None
@@ -127,18 +114,6 @@ def _find_json_object(text: str) -> Optional[str]:
 
 
 def _extract_leaked_tool_call(text: str, valid_tool_names: set) -> Optional[dict]:
-    """Some models (especially smaller local ones via Ollama) occasionally
-    write out a tool call as plain text content — e.g.
-    '{"name": "read_file", "arguments": {"path": "x.py"}}' — instead of
-    using the model's real structured tool-calling mechanism. Left alone,
-    this looks like empty tool_calls + a final text answer, so the graph
-    ends the run with that JSON string as the "answer" and nothing actually
-    happens. Detect that shape and repair it into a real tool call so
-    tools_node can execute it normally.
-
-    Returns a langchain-style tool_call dict ({"name", "args", "id"}) if a
-    valid one was found, else None (in which case the text is left as a
-    normal — if odd-looking — final answer)."""
     if "{" not in text or '"name"' not in text:
         return None
     blob = _find_json_object(text)
@@ -160,16 +135,15 @@ def _extract_leaked_tool_call(text: str, valid_tool_names: set) -> Optional[dict
 
 
 def _identify_provider(response: Any, config: AgentConfig) -> str:
-    """Best-effort guess at which tier of the Groq -> OpenRouter -> Ollama
-    fallback chain actually answered — with_fallbacks() doesn't tag this
-    directly, so it's inferred from response metadata. Logging visibility
-    only; never used for control flow."""
+    """Best-effort guess at which tier of the fallback chain actually answered"""
     meta = getattr(response, "response_metadata", {}) or {}
     model = meta.get("model_name") or meta.get("model") or ""
     if model == config.model_name:
-        return f"groq:{model}"
+        return f"sambanova:{model}"
     if model == config.fallback_model_name:
         return f"openrouter:{model}"
+    if model == config.groq_model_name:
+        return f"groq:{model}"
     if model == config.ollama_model or "done_reason" in meta:  # ollama-specific metadata key
         return f"ollama:{model or config.ollama_model}"
     return model or "unknown"
@@ -200,21 +174,6 @@ SYSTEM_PROMPT = (
 
 
 def _truncate(text: object, limit: int = MAX_TOOL_OUTPUT_CHARS, continuation_hint_tool: Optional[str] = None) -> str:
-    """Truncate long tool output before it goes back to the model.
-
-    For read_file specifically, a flat character cutoff with no pointer back
-    into the file causes two distinct real failure modes seen in practice:
-    a model that can't tell it only saw a partial file may either (a) keep
-    re-reading with guessed-larger end_line values forever, since every read
-    from line 1 returns the identical truncated head regardless of the range
-    requested, or worse (b) treat the truncated slice as the whole file,
-    make a correct-looking but tiny edit confined to what it could see, and
-    report the (much larger) task as done. read_file's own output is
-    formatted as "<line_number>\\t<content>" per line (seen consistently in
-    practice), so we can parse the last fully-visible line number out of the
-    truncated text and tell the model exactly where to resume — turning a
-    silent, ambiguous cutoff into an explicit, actionable pointer.
-    """
     text = "" if text is None else str(text)
     if len(text) <= limit:
         return text
@@ -287,10 +246,6 @@ def _slim_tool_calls(tool_calls: list) -> list:
 
 
 def _prepare_messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Return a copy of the history to send to the LLM with large tool-call
-    arguments shortened and older tool RESULTS collapsed. Only affects what's
-    sent on the wire for this request — state.messages (used for tool
-    execution, logging, etc.) is untouched."""
     messages = _collapse_old_tool_results(messages)
     prepared = []
     for m in messages:
@@ -310,17 +265,6 @@ def _last_ai_message_with_tool_calls(messages: list[BaseMessage]):
 
 
 def _detect_read_only_stagnation(tool_log: list, threshold: int = STAGNATION_REPEAT_THRESHOLD) -> Optional[str]:
-    """If the last `threshold` tool calls were all the same read-only tool
-    against the same target (its `path` arg, when present) with no mutating
-    call in between, the model is very likely stuck probing rather than
-    making progress — e.g. re-reading a file with different line ranges
-    instead of ever calling edit_file/write_file. Returns a corrective nudge
-    to append to model_input, or None if nothing looks stuck.
-
-    Deliberately narrow (exact same tool + same target, back-to-back) to
-    avoid false positives on legitimate multi-file exploration — reading
-    several different files in a row is normal and untouched by this check.
-    """
     if len(tool_log) < threshold:
         return None
     recent = tool_log[-threshold:]
@@ -347,9 +291,6 @@ _SHARED_CHECKPOINTER = InMemorySaver()
 
 
 def build_graph(agent_config: AgentConfig, tools: list):
-    """Compile the agent graph for a given config + toolset. Call once per
-    process per (config, toolset) pair — the graph object itself is cheap to
-    reuse across many run_agent() calls with different thread_ids."""
     names = [t.name for t in tools]
     duplicates = {n for n in names if names.count(n) > 1}
     if duplicates:
@@ -368,7 +309,6 @@ def build_graph(agent_config: AgentConfig, tools: list):
         if state.status in ("cancelled", "error", "max_iterations_reached"):
             return {}
 
-        # Loop guard: stop calling the model once we've hit the cap.
         if state.iterations >= agent_config.max_iterations:
             return {
                 "messages": [
@@ -435,8 +375,6 @@ def build_graph(agent_config: AgentConfig, tools: list):
                             )
                         ]
                         continue
-                    # retries exhausted — return the empty response rather than looping forever;
-                    # run_end will show tool_call_count/iterations so this is at least diagnosable.
 
                 log_event(
                     agent_config.log_file, "llm_call", thread_id=thread_id,
@@ -451,7 +389,7 @@ def build_graph(agent_config: AgentConfig, tools: list):
                     "status": "cancelled",
                     "error": "cancelled by user (Ctrl-C) during LLM call",
                 }
-            except Exception as e:  # noqa: BLE001 - provider errors are heterogeneous by design
+            except Exception as e:
                 last_error = e
                 msg = str(e).lower()
                 is_token_rate_limit = any(marker in msg for marker in TOKEN_RATE_LIMIT_MARKERS)
@@ -495,7 +433,6 @@ def build_graph(agent_config: AgentConfig, tools: list):
                             )
                         ]
                         continue
-                    # retries exhausted — fall through to the generic failure path below
 
                 retry_after = _parse_retry_after(msg)
                 is_rate_limit = (
@@ -538,7 +475,7 @@ def build_graph(agent_config: AgentConfig, tools: list):
                 AIMessage(
                     content=(
                         "I hit an error calling the model across every configured provider "
-                        f"(Groq, OpenRouter, and local Ollama — whichever are set up) and "
+                        f"(SambaNova, OpenRouter, Groq, and local Ollama — whichever are set up) and "
                         f"couldn't recover: {last_error}"
                     )
                 )
@@ -549,12 +486,6 @@ def build_graph(agent_config: AgentConfig, tools: list):
         }
 
     def _dedup_and_validate_tool_calls(tool_calls: list, thread_id: str) -> list:
-        """Filter out malformed tool calls (missing id/name — not impossible
-        from a weaker fallback tier producing an oddly-shaped response) and
-        drop duplicate call_ids (a model emitting the same call twice would
-        otherwise execute it twice and produce two ToolMessages with the
-        same tool_call_id, which some providers reject on the next turn).
-        Never raises — problems here are dropped and logged, not a crash."""
         seen_ids: set = set()
         valid = []
         for tc in tool_calls:
@@ -647,11 +578,6 @@ def build_graph(agent_config: AgentConfig, tools: list):
                     output = _truncate(raw_output, continuation_hint_tool=name)
                     success = not (isinstance(raw_output, str) and raw_output.startswith(("ERROR", "BLOCKED")))
                 except KeyboardInterrupt:
-                    # Ctrl-C during a slow tool call (long shell command, Jupyter
-                    # cell, etc). Not an Exception subclass, so the `except
-                    # Exception` below would have missed it and let it crash the
-                    # REPL. Record this call as cancelled and stop the batch —
-                    # don't keep firing off further tool calls after a cancel.
                     output = "CANCELLED: interrupted by user (Ctrl-C) while this tool was running."
                     success = False
                     new_messages.append(ToolMessage(content=output, tool_call_id=call_id, name=name))
@@ -664,7 +590,7 @@ def build_graph(agent_config: AgentConfig, tools: list):
                     log_event(agent_config.log_file, "tool_call_cancelled", thread_id=thread_id, tool_name=name)
                     cancelled = True
                     break
-                except Exception as e:  # noqa: BLE001 - bad args, tool bugs, etc. must not crash the graph
+                except Exception as e:
                     output = f"ERROR: tool '{name}' raised an exception: {e}"
                     success = False
 
@@ -712,3 +638,4 @@ def build_graph(agent_config: AgentConfig, tools: list):
     builder.add_edge("tools", "agent")
 
     return builder.compile(checkpointer=_SHARED_CHECKPOINTER)
+    

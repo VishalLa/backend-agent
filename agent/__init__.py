@@ -1,4 +1,4 @@
-"""Local coding agent: binds tools/ALL_TOOLS to a shared Groq LLM via a
+"""Local coding agent: binds tools/ALL_TOOLS to a shared SambaNova LLM via a
 LangGraph graph, with pydantic-validated config/state/results and a human
 confirmation gate on shell commands and other destructive actions.
 
