@@ -9,7 +9,7 @@ class SandboxConfig:
 
     image_tag: str = "agent-sandbox:latest"
 
-    # resource limits 
+    # resource limits
     mem_limit: str = "512m"
     memswap_limit: Optional[str] = None
     nano_cpus: int = 1_000_000_000
@@ -18,12 +18,13 @@ class SandboxConfig:
 
     # network / filesystem isolation
     network_disabled: bool = True
+    internal_network_name: str = "agent-sandbox-net"
     read_only_rootfs: bool = True
 
     # lifecycle
     startup_timeout_s: float = 15.0
     default_exec_timeout_s: int = 30
-    idle_container_ttl_s: float = 600.0 
+    idle_container_ttl_s: float = 600.0
 
     # security hardening passed straight to the docker daemon
     cap_drop: list[str] = field(default_factory=lambda: ["ALL"])

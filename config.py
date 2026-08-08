@@ -25,11 +25,11 @@ class Config(BaseModel):
     sambanova_base_url: str = "https://api.sambanova.ai/v1"
     sambanova_model: str = DEFAULT_SAMBANOVA_MODAL
 
-    groq_api_key: SecretStr = None
+    groq_api_key: SecretStr
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = DEFAULT_GROQ_MODEL
 
-    openrouter_api_key: SecretStr = None
+    openrouter_api_key: SecretStr
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL
 
@@ -57,6 +57,14 @@ class Config(BaseModel):
 
     agent_type: str = "backend"
     provider: str = "api"
+
+    postgres_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"
+    postgres_pool_size: int = 5
+    postgres_echo: bool = False
+
+    celery_broker_url: str = "redis://localhost:6379/0"
+    celery_result_backend: str = "redis://localhost:6379/1"
+    celery_task_always_eager: bool = True
 
     @field_validator(
         "sambanova_api_key",
@@ -164,16 +172,16 @@ class Config(BaseModel):
             ("AGENT_CONFIRM_ALL_TOOLS", "false").strip().lower() in ("1", "true", "yes", "on")
         )
 
-		return cls(
-			sambanova_api_key=SecretStr(sambanova_key),
-			sambanova_base_url=os.environ.get("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1"),
+        return cls(
+            sambanova_api_key=SecretStr(sambanova_key),
+            sambanova_base_url=os.environ.get("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1"),
 
-			groq_api_key=SecretStr(groq_key),
-			groq_base_url=os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            groq_api_key=SecretStr(groq_key),
+            groq_base_url=os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
 
-			openrouter_api_key=SecretStr(openrouter_key),
-			openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            openrouter_api_key=SecretStr(openrouter_key),
+            openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 
-			enable_ollama_fallback=enable_ollama,
-			confirm_all_tools=confirm_all
-		)
+            enable_ollama_fallback=enable_ollama,
+            confirm_all_tools=confirm_all
+        )

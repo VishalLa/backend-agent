@@ -12,3 +12,4 @@ wheels/
 *.env
 *-workflow*
 test.*
+test
