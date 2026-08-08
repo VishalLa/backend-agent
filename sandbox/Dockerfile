@@ -1,15 +1,16 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-# Install pandas, matplotlib, and server dependencies
-RUN pip install --no-cache-dir \
-    pandas \
-    matplotlib \
-    fastapi \
-    uvicorn \
-    pydantic
+RUN groupadd -r sandbox && useradd -r -g sandbox -d /home/sandbox -m sandbox
 
-COPY worker.py /app/worker.py
 WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /root/.cache
 
-# Run Uvicorn listening strictly on a Unix socket, NOT a network port
-CMD ["uvicorn", "worker:sandbox", "--uds", "/workspace/sandbox.sock"]
+COPY server.py .
+RUN mkdir -p /workspace && chown -R sandbox:sandbox /workspace /app
+
+USER sandbox
+EXPOSE 8787
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8787", "--workers", "1"]
