@@ -47,6 +47,8 @@ class Config(BaseModel):
     ollama_num_thread: Optional[int] = None
     ollama_request_timeout: float = 300.0
 
+    max_context_tokens: int = 8192
+
     confirm_all_tools: bool = False
 
     log_file: str = "agent_events.log"
@@ -61,7 +63,7 @@ class Config(BaseModel):
     agent_type: str = "backend"
     provider: str = "api"
 
-    # per-task-type model overrides
+    # per-task-type model overrides 
     backend_model_name: str = DEFAULT_SAMBANOVA_MODAL
     ml_model_name: str = DEFAULT_SAMBANOVA_MODAL
     git_model_name: str = DEFAULT_GROQ_MODEL
@@ -75,6 +77,7 @@ class Config(BaseModel):
     celery_result_backend: str = "redis://localhost:6379/1"
     celery_task_always_eager: bool = True
 
+
     @field_validator(
         "sambanova_api_key",
         "groq_api_key",
@@ -85,6 +88,7 @@ class Config(BaseModel):
         if not v.get_secret_value().strip():
             raise ValueError("api key is empty")
         return v
+
 
     @field_validator(
         "sambanova_model",
@@ -135,7 +139,8 @@ class Config(BaseModel):
         "max_iterations",
         "max_retries",
         "ollama_num_ctx",
-        "ollama_num_predict"
+        "ollama_num_predict",
+        "max_context_tokens",
     )
     @classmethod
     def _positive(cls, v: int) -> int:
@@ -162,14 +167,22 @@ class Config(BaseModel):
             self.sambanova_api_key.get_secret_value() if self.sambanova_api_key else ""
         )
 
+
     def get_model_for_task(self, task_mode: str) -> str:
         from task_profile import TASK_PROFILES
 
         profile = TASK_PROFILES.get(task_mode)
+
         if profile is None:
             return self.sambanova_model
+
         field_name = profile.get("model_field")
         return getattr(self, field_name, self.sambanova_model)
+
+
+    def context_over_budget(self, current_tokens: int) -> bool:
+        return current_tokens >= self.max_context_tokens
+
 
     @classmethod
     def from_env(cls) -> "Config":

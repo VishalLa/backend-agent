@@ -53,4 +53,3 @@ def default_cli_confirmation_handler(
         reason="declined by user"
     )
     
-    

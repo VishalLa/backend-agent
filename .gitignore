@@ -13,3 +13,4 @@ wheels/
 *-workflow*
 test.*
 test
+.vscode

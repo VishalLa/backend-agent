@@ -22,7 +22,7 @@ class ChatModel:
 
     def _build_sambanova(self) -> ChatOpenAI:
         return ChatOpenAI(
-            model=self.config.sambanova_model,
+            model=self.config.get_model_for_task(self.config.agent_type),
             api_key=self.config.sambanova_api_key,
             base_url=self.config.sambanova_base_url,
             temperature=self.config.temperature,
@@ -88,10 +88,15 @@ class ChatModel:
         """Build the runnable for this self.config, respecting self.config.provider:
 
         - "local": bypass the API chain entirely and talk to Ollama directly.
-        - "api" (default): the full chain — primary (SambaNova) -> OpenRouter -> Groq
-          -> local Ollama (if enable_ollama_fallback=True) as the last resort.
-        """
+        - "api" (default): the full chain — primary (SambaNova, using the
+          model resolved for self.config.agent_type via get_model_for_task)
+          -> OpenRouter -> Groq -> local Ollama (if enable_ollama_fallback=True)
+          as the last resort.
 
+        Only the primary provider's model varies per task_mode. Fallbacks
+        keep their own configured models - they're meant to be "whatever
+        still works" if the primary is down, not task-tuned picks.
+        """
         if self.config.provider == "local":
             if not self.config.enable_ollama_fallback:
                 raise ValueError(
@@ -131,7 +136,6 @@ class ChatModel:
         return (
             self.config.provider,
             self.config.agent_type,
-            self.config.confirm_all_tools,
             self.config.temperature
         ) + extra
 
