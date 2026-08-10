@@ -16,7 +16,7 @@ from .sandbox_config import SandboxConfig
 
 logger = logging.getLogger("sandbox")
 
-IMAGE_DIR = Path(__file__).parent / "image"
+IMAGE_DIR = Path(__file__).parent
 
 
 class SandboxError(RuntimeError):

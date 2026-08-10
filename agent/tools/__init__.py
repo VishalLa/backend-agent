@@ -4,6 +4,7 @@ from .git_tool import git_branch, git_checkout, git_commit, git_diff, git_log, g
 from .jupyter_tool import execute_code, restart_kernel
 from .search_tool import ripgrep_search, web_search
 from .shell_tool import run_shell_command
+from .sandbox_tool import execute_in_sandbox
 from .system_tool import check_gpu_status, delete_path, launch_background_process, tail_log
 
 
@@ -55,6 +56,8 @@ ML_TOOLS = [
     delete_path,
 ]
 
+SANDBOX_TOOLS = [execute_in_sandbox]
+
 TOOLS_BY_TASK = {
     "backend": BACKEND_TOOLS,
     "ml": ML_TOOLS,
@@ -62,4 +65,6 @@ TOOLS_BY_TASK = {
     "algorithms": ALGO_TOOLS,
 }
 
-__all__ = ["BACKEND_TOOLS", "ALGO_TOOLS", "GIT_TOOLS", "ML_TOOLS", "TOOLS_BY_TASK"]
+__all__ = [
+    "BACKEND_TOOLS", "ALGO_TOOLS", "GIT_TOOLS", "ML_TOOLS", "SANDBOX_TOOLS", "TOOLS_BY_TASK",
+]

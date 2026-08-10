@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import subprocess
 
 from langchain_core.tools import tool

@@ -19,9 +19,13 @@ from langgraph.types import interrupt
 
 from config import Config
 from log.log_event import log_event, safe_args
-from schema.agent_schema import AgentState, ConfirmationDecision, ConfirmationRequest, ToolCallLog
+from schema.agent_schema import AgentState, ConfirmationRequest, ToolCallLog
 
-from ..confirmation import needs_confirmation
+from ..confirmation import (
+    confirmation_request_payload,
+    needs_confirmation,
+    parse_confirmation_decision,
+)
 from ..context_window import ContextWindowHandler
 from ..llm import ChatModel
 from ..task_profile import filter_tools_for_task
@@ -108,6 +112,13 @@ class BaseAgent(ABC):
         self.context_window = ContextWindowHandler(self.config)
 
         self.system_prompt = self._load_system_prompt()
+        if "execute_in_sandbox" in self.tools_by_name:
+            self.system_prompt += (
+                "\n\n## Isolated execution\n"
+                "`execute_in_sandbox` is available for self-contained Python or shell verification. "
+                "Prefer it over host shell execution when the check does not need project files. "
+                "The sandbox has no network access and no host-project mount."
+            )
         self.graph = self._build_graph(checkpointer)
 
 
@@ -348,12 +359,8 @@ class BaseAgent(ABC):
                 tool_args=args,
                 call_id=call_id,
             )
-            raw_decision = interrupt(request)
-            decision = (
-                raw_decision
-                if isinstance(raw_decision, ConfirmationDecision)
-                else ConfirmationDecision(**(raw_decision or {}))
-            )
+            raw_decision = interrupt(confirmation_request_payload(request))
+            decision = parse_confirmation_decision(raw_decision)
 
             log_event(
                 self.config.log_file,

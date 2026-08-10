@@ -227,4 +227,12 @@ class Config(BaseModel):
             ml_model_name=os.environ.get("ML_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
             git_model_name=os.environ.get("GIT_MODEL_NAME", DEFAULT_GROQ_MODEL),
             algo_model_name=os.environ.get("ALGO_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
+
+            postgres_url=os.environ.get("POSTGRES_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"),
+            postgres_pool_size=int(os.environ.get("POSTGRES_POOL_SIZE", "5")),
+            postgres_echo=os.environ.get("POSTGRES_ECHO", "false").strip().lower() in ("1", "true", "yes", "on"),
+
+            celery_broker_url=os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+            celery_result_backend=os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
+            celery_task_always_eager=os.environ.get("CELERY_TASK_ALWAYS_EAGER", "true").strip().lower() in ("1", "true", "yes", "on"),
         )

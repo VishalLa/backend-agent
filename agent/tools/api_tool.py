@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import httpx
+
 from typing import Optional
+
 from langchain_core.tools import tool
 
 

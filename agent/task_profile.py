@@ -13,6 +13,7 @@ TASK_PROFILES = {
             "web_search",
             "http_request",
             "fetch_openapi_schema",
+            "execute_in_sandbox",
             "delete_path"
         }
     },
@@ -32,6 +33,7 @@ TASK_PROFILES = {
             "check_gpu_status",
             "launch_background_process",
             "tail_log",
+            "execute_in_sandbox",
             "delete_path",
         }
     },
@@ -62,6 +64,7 @@ TASK_PROFILES = {
             "web_search",
             "http_request",
             "fetch_openapi_schema",
+            "execute_in_sandbox",
             "delete_path"
         }
     }
