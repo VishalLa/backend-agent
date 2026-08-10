@@ -17,6 +17,8 @@ class SessionStatus(str, enum.Enum):
 class AgentType(str, enum.Enum):
     backend = "backend"
     ml = "ml"
+    git = "git"
+    algorithms = "algorithms"
 
 
 class MessageRole(str, enum.Enum):
@@ -48,4 +50,3 @@ class AgentFileType(str, enum.Enum):
 def utcnow() -> datetime:
     """Timezone-aware UTC timestamp, used as the default for all created_at columns."""
     return datetime.now(timezone.utc)
-
