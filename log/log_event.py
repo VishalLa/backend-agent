@@ -8,7 +8,7 @@ _lock = threading.Lock()
 DEFAULT_LOG_FILE = "agent_events.log"
 
 def log_event(
-    log_event: str,
+    log_file: str,
     event_type: str,
     **fields: Any
 ) -> None:
@@ -19,9 +19,9 @@ def log_event(
     }
 
     try:
-        path = Path(log_path or DEFAULT_LOG_FILE)
+        path = Path(log_file or DEFAULT_LOG_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dump(entry, default=str)
+        line = json.dumps(entry, default=str)
 
         with _lock:
             with open(path, "a", encoding="utf-8") as f:

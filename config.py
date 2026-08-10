@@ -169,7 +169,7 @@ class Config(BaseModel):
 
 
     def get_model_for_task(self, task_mode: str) -> str:
-        from task_profile import TASK_PROFILES
+        from agent.task_profile import TASK_PROFILES
 
         profile = TASK_PROFILES.get(task_mode)
 

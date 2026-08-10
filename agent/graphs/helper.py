@@ -116,21 +116,44 @@ def classify_error(error_text: str) -> dict:
 
 
 def _identify_provider(response: Any, config: Config) -> str:
+    """Return the provider only when the response metadata makes it clear.
+
+    Fallback providers can be configured with the same model name, so model
+    matching alone must not silently attribute a response to the first match.
+    """
     meta = getattr(response, "response_metadata", {}) or {}
     model = str(meta.get("model_name") or meta.get("model") or "").strip().lower()
+
+    for key in ("provider", "provider_name", "model_provider"):
+        provider = meta.get(key)
+        if isinstance(provider, str) and provider.strip():
+            return provider.strip().lower()
+
+    # ChatOllama includes this field, unlike the OpenAI-compatible providers.
+    if "done_reason" in meta:
+        return "ollama"
+
+    candidates = {
+        "sambanova": getattr(config, "sambanova_model", None),
+        "groq": getattr(config, "groq_model", None),
+        "openrouter": getattr(config, "openrouter_model", None),
+        "ollama": getattr(config, "ollama_model", None),
+    }
+    try:
+        candidates["sambanova"] = config.get_model_for_task(config.agent_type)
+    except (AttributeError, ImportError):
+        pass
+
     if not model:
         return "unknown"
 
-    candidates = {
-        "sambanova": config.get_model_for_task(config.agent_type),
-        "groq": config.groq_model,
-        "openrouter": config.openrouter_model,
-        "ollama": config.ollama_model,
-    }
-    for provider, candidate_model in candidates.items():
-        if candidate_model and candidate_model.strip().lower() == model:
-            return provider
-    return model or "unknown"
+    matches = [
+        provider for provider, candidate_model in candidates.items()
+        if isinstance(candidate_model, str) and candidate_model.strip().lower() == model
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return f"ambiguous:{model}" if matches else model
 
 
 def _thread_id() -> str:
@@ -147,11 +170,11 @@ def _thread_id() -> str:
         return "unknown"
 
 
-def _find_json_object(text: str) -> Optional[str]:
+def _find_json_object(text: str, start_at: int = 0) -> Optional[str]:
     """Find the first balanced {...} object in text, ignoring braces that
     appear inside quoted strings (e.g. a leaked tool call whose arguments
     contain literal '{'/'}' characters, like a code snippet)."""
-    start = text.find("{")
+    start = text.find("{", start_at)
     if start == -1:
         return None
 
@@ -192,32 +215,34 @@ def _extract_leaked_tool_call(
     executed rather than silently ignored."""
     if "{" not in text or '"name"' not in text:
         return None
-    blob = _find_json_object(text)
+    allowed_names = set(valid_tool_names)
+    cursor = 0
 
-    if not blob:
-        return None
+    while True:
+        blob = _find_json_object(text, cursor)
+        if not blob:
+            return None
+        cursor = text.find("{", cursor) + 1
 
-    try:
-        parsed = json.loads(blob)
-    except (json.JSONDecodeError, ValueError):
-        return None
+        try:
+            parsed = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
 
-    if not isinstance(parsed, dict):
-        return None
-    name = parsed.get("name")
+        if not isinstance(parsed, dict):
+            continue
+        name = parsed.get("name")
+        if not isinstance(name, str) or name not in allowed_names:
+            continue
 
-    if not isinstance(name, str) or name not in valid_tool_names:
-        return None
-    args = parsed.get("arguments", parsed.get("args", parsed.get("parameters", {})))
-
-    if not isinstance(args, dict):
-        args = {}
-
-    return {
-        "name": name,
-        "args": args,
-        "id": f"repaired-{uuid.uuid4().hex[:8]}"
-    }
+        args = parsed.get("arguments", parsed.get("args", parsed.get("parameters", {})))
+        if not isinstance(args, dict):
+            args = {}
+        return {
+            "name": name,
+            "args": args,
+            "id": f"repaired-{uuid.uuid4().hex[:8]}"
+        }
 
 
 def _truncate(
@@ -342,11 +367,15 @@ def _detect_read_only_stagnation(
     (name,) = names
     if name not in READ_ONLY_TOOL_NAMES:
         return None
-    targets = {(d.get("args") or {}).get("path") for d in recent}
-    if len(targets) != 1:
+    signatures = {
+        json.dumps(d.get("args") or {}, sort_keys=True, default=str)
+        for d in recent
+    }
+    if len(signatures) != 1:
         return None
 
-    (target,) = targets
+    args = recent[0].get("args") or {}
+    target = args.get("path")
     where = f" on `{target}`" if target else ""
     return (
         f"SYSTEM: you've called '{name}'{where} {threshold} times in a row without making "
