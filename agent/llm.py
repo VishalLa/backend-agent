@@ -20,10 +20,17 @@ class ChatModel:
         self._llm_with_tools_cache: dict[tuple, Any] = {}
 
 
+    def _get_secret(self, secret: Any) -> Optional[str]:
+        """Safely extract the string from a Pydantic SecretStr to prevent validation errors."""
+        if not secret:
+            return None
+        return secret.get_secret_value() if hasattr(secret, 'get_secret_value') else str(secret)
+
+
     def _build_sambanova(self) -> ChatOpenAI:
         return ChatOpenAI(
             model=self.config.get_model_for_task(self.config.agent_type),
-            api_key=self.config.sambanova_api_key,
+            api_key=self._get_secret(self.config.sambanova_api_key) or "missing_key",
             base_url=self.config.sambanova_base_url,
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
@@ -33,10 +40,14 @@ class ChatModel:
 
 
     def _build_openrouter(self) -> Optional[ChatOpenAI]:
+        api_key = self._get_secret(self.config.openrouter_api_key)
+        if not api_key:
+            return None
+            
         try:
             return ChatOpenAI(
                 model=self.config.openrouter_model,
-                api_key=self.config.openrouter_api_key,
+                api_key=api_key,
                 base_url=self.config.openrouter_base_url,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
@@ -50,10 +61,14 @@ class ChatModel:
 
 
     def _build_groq(self) -> Optional[ChatOpenAI]:
+        api_key = self._get_secret(self.config.groq_api_key)
+        if not api_key:
+            return None
+            
         try:
             return ChatOpenAI(
                 model=self.config.groq_model,
-                api_key=self.config.groq_api_key,
+                api_key=api_key,
                 base_url=self.config.groq_base_url,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
@@ -73,30 +88,22 @@ class ChatModel:
             num_predict=self.config.ollama_num_predict,
             num_ctx=self.config.ollama_num_ctx,
             keep_alive=self.config.ollama_keep_alive,
-            client_kwargs={"timeout": self.config.ollama_request_timeout}
         )
         if self.config.ollama_num_thread is not None:
             kwargs["num_thread"] = self.config.ollama_num_thread
+            
         try:
-            return ChatOllama(**kwargs)
+            try:
+                return ChatOllama(**kwargs, timeout=self.config.ollama_request_timeout)
+            except Exception:
+                return ChatOllama(**kwargs)
         except Exception as e:
             print(f"ERROR: failed to build Ollama client: {e}")
             return None
 
 
     def _fallback_chain(self, tools: Optional[list]) -> Any:
-        """Build the runnable for this self.config, respecting self.config.provider:
-
-        - "local": bypass the API chain entirely and talk to Ollama directly.
-        - "api" (default): the full chain — primary (SambaNova, using the
-          model resolved for self.config.agent_type via get_model_for_task)
-          -> OpenRouter -> Groq -> local Ollama (if enable_ollama_fallback=True)
-          as the last resort.
-
-        Only the primary provider's model varies per task_mode. Fallbacks
-        keep their own configured models - they're meant to be "whatever
-        still works" if the primary is down, not task-tuned picks.
-        """
+        """Build the runnable for this self.config, respecting self.config.provider."""
         if self.config.provider == "local":
             if not self.config.enable_ollama_fallback:
                 raise ValueError(
@@ -129,7 +136,8 @@ class ChatModel:
                 ollama = ollama.bind_tools(tools)
 
         fallbacks = [m for m in (openrouter, groq, ollama) if m is not None]
-        return primary.with_fallbacks(fallbacks) if fallbacks else primary
+        
+        return primary.with_fallbacks(fallbacks, exceptions_to_handle=(Exception,)) if fallbacks else primary
 
 
     def _cache_key(self, extra: tuple = ()) -> tuple:

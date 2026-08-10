@@ -77,4 +77,11 @@ def filter_tools_for_task(task_mode: str, all_tools: list) -> list:
         return all_tools
     names = profile["tool_names"]
     filtered = [t for t in all_tools if t.name in names]
-    return filtered if filtered else all_tools
+    if not filtered:
+        raise ValueError(
+            f"No tools matched task '{task_mode}'. Expected one of {sorted(names)} "
+            f"but got {sorted(t.name for t in all_tools)}. Refusing to fall back to "
+            "the full, unrestricted toolset."
+        )
+    return filtered
+    

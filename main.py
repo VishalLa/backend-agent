@@ -331,8 +331,8 @@ def main() -> None:
         sandbox_enabled=sandbox_enabled,
         database_enabled=database_enabled,
     )
-    if database_enabled:
-        _restore_persisted_conversations(runner, selected_agent)
+    if database_enabled and runner is not None:
+        _restore_persisted_conversations(runner.storage, selected_agent)
 
     with st.sidebar:
         st.divider()

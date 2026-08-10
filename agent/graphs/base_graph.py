@@ -65,6 +65,10 @@ class BaseAgent(ABC):
     agent_node / tool_node / confirmation_node / route_after_agent in a
     subclass only if that specific agent genuinely needs different node
     *behavior*, not just a different prompt, tool set, or model.
+
+    Monitoring: every node entry/exit and lifecycle boundary (init, graph
+    build, routing decisions) emits a log_event so subclasses get uniform
+    observability for free without needing to add their own logging.
     """
 
     TASK_MODE: ClassVar[str] = ""  # e.g. "backend" / "ml" / "git" / "algorithms"
@@ -80,6 +84,8 @@ class BaseAgent(ABC):
         tools: list[Any],
         checkpointer: Optional[Any] = None,
     ) -> None:
+        init_started_at = time.monotonic()
+
         if not self.TASK_MODE:
             raise NotImplementedError(
                 f"{type(self).__name__} must set a class-level TASK_MODE "
@@ -88,8 +94,16 @@ class BaseAgent(ABC):
         if not tools:
             raise ValueError(f"{type(self).__name__} requires at least one tool")
 
-
         self.config = config.model_copy(update={"agent_type": self.TASK_MODE})
+
+        log_event(
+            self.config.log_file,
+            "agent_init_started",
+            agent_class=type(self).__name__,
+            task_mode=self.TASK_MODE,
+            requested_tool_count=len(tools),
+            has_checkpointer=checkpointer is not None,
+        )
 
         if config.agent_type != self.TASK_MODE:
             log_event(
@@ -102,12 +116,28 @@ class BaseAgent(ABC):
         self.tools = filter_tools_for_task(self.TASK_MODE, tools)
         self.tool_names = [tool.name for tool in self.tools]
 
+        log_event(
+            self.config.log_file,
+            "agent_tools_filtered",
+            task_mode=self.TASK_MODE,
+            input_tool_count=len(tools),
+            filtered_tool_count=len(self.tool_names),
+            tool_names=sorted(self.tool_names),
+        )
+
         duplicates = {name for name in self.tool_names if self.tool_names.count(name) > 1}
         if duplicates:
+            log_event(
+                self.config.log_file,
+                "agent_init_failed",
+                task_mode=self.TASK_MODE,
+                reason="duplicate_tool_names",
+                duplicates=sorted(duplicates),
+            )
             raise ValueError(f"Duplicate tool names in toolset: {sorted(duplicates)}")
 
         self.tools_by_name = {tool.name: tool for tool in self.tools}
-        
+
         self.llm_with_tools = ChatModel(self.config).get_llm_with_tools(self.tools)
         self.context_window = ContextWindowHandler(self.config)
 
@@ -121,6 +151,16 @@ class BaseAgent(ABC):
             )
         self.graph = self._build_graph(checkpointer)
 
+        log_event(
+            self.config.log_file,
+            "agent_init_completed",
+            agent_class=type(self).__name__,
+            task_mode=self.TASK_MODE,
+            tool_count=len(self.tool_names),
+            system_prompt_chars=len(self.system_prompt),
+            duration_ms=int((time.monotonic() - init_started_at) * 1000),
+        )
+
 
     @property
     def _md_filename(self) -> str:
@@ -131,6 +171,12 @@ class BaseAgent(ABC):
         try:
             text = path.read_text(encoding="utf-8").strip()
             if text:
+                log_event(
+                    self.config.log_file,
+                    "agent_md_load_succeeded",
+                    path=str(path),
+                    chars=len(text),
+                )
                 return text
         except OSError as exc:
             log_event(
@@ -139,15 +185,56 @@ class BaseAgent(ABC):
                 path=str(path),
                 error=str(exc),
             )
+        log_event(
+            self.config.log_file,
+            "agent_md_fallback_used",
+            path=str(path),
+            task_mode=self.TASK_MODE,
+        )
         return self.FALLBACK_SYSTEM_PROMPT
 
     def agent_node(self, state: AgentState) -> dict[str, Any]:
         thread_id = _thread_id()
+        node_started_at = time.monotonic()
+
+        log_event(
+            self.config.log_file,
+            "node_entered",
+            node="agent",
+            thread_id=thread_id,
+            iterations=state.iterations,
+            status=state.status,
+            message_count=len(state.messages),
+        )
 
         if state.status in {"cancelled", "error", "max_iterations_reached"}:
+            log_event(
+                self.config.log_file,
+                "node_exited",
+                node="agent",
+                thread_id=thread_id,
+                reason="terminal_status_short_circuit",
+                status=state.status,
+                duration_ms=int((time.monotonic() - node_started_at) * 1000),
+            )
             return {}
 
         if state.iterations >= self.config.max_iterations:
+            log_event(
+                self.config.log_file,
+                "agent_max_iterations_reached",
+                thread_id=thread_id,
+                iterations=state.iterations,
+                max_iterations=self.config.max_iterations,
+            )
+            log_event(
+                self.config.log_file,
+                "node_exited",
+                node="agent",
+                thread_id=thread_id,
+                reason="max_iterations_reached",
+                duration_ms=int((time.monotonic() - node_started_at) * 1000),
+            )
             return {
                 "messages": [AIMessage(content=f"Stopping: reached max_iterations ({self.config.max_iterations}).")],
                 "status": "max_iterations_reached",
@@ -200,12 +287,28 @@ class BaseAgent(ABC):
 
                 if not has_tool_calls and not content.strip() and empty_retries_left:
                     empty_retries_left -= 1
+                    log_event(
+                        self.config.log_file,
+                        "llm_empty_response_retry",
+                        thread_id=thread_id,
+                        retries_left=empty_retries_left,
+                    )
                     model_input.append(
                         HumanMessage(content="SYSTEM: Your last response was empty. Continue with a tool call or a final answer.")
                     )
                     continue
 
                 log_event(self.config.log_file, "llm_call", thread_id=thread_id, provider=_identify_provider(response, self.config))
+                log_event(
+                    self.config.log_file,
+                    "node_exited",
+                    node="agent",
+                    thread_id=thread_id,
+                    reason="llm_response_received",
+                    has_tool_calls=has_tool_calls,
+                    tool_call_count=len(getattr(response, "tool_calls", None) or []),
+                    duration_ms=int((time.monotonic() - node_started_at) * 1000),
+                )
                 return {
                     "messages": [response],
                     "iterations": state.iterations + 1
@@ -239,6 +342,14 @@ class BaseAgent(ABC):
                             )
                             continue
 
+                    log_event(
+                        self.config.log_file,
+                        "node_exited",
+                        node="agent",
+                        thread_id=thread_id,
+                        reason="context_too_large_unrecoverable",
+                        duration_ms=int((time.monotonic() - node_started_at) * 1000),
+                    )
                     return {
                         "messages": [
                             AIMessage(
@@ -252,6 +363,13 @@ class BaseAgent(ABC):
 
                 if "tool" in str(exc).lower() and "name" in str(exc).lower() and hallucination_retries_left:
                     hallucination_retries_left -= 1
+                    log_event(
+                        self.config.log_file,
+                        "llm_tool_hallucination_retry",
+                        thread_id=thread_id,
+                        retries_left=hallucination_retries_left,
+                        error=str(exc),
+                    )
                     model_input.append(HumanMessage(content=(
                         "SYSTEM: Use only these exact tool names: " + ", ".join(sorted(self.tools_by_name))
                     )))
@@ -278,6 +396,14 @@ class BaseAgent(ABC):
             thread_id=thread_id,
             reason="retries_exhausted",
             error=error_text
+        )
+        log_event(
+            self.config.log_file,
+            "node_exited",
+            node="agent",
+            thread_id=thread_id,
+            reason="retries_exhausted",
+            duration_ms=int((time.monotonic() - node_started_at) * 1000),
         )
 
         return {
@@ -321,6 +447,16 @@ class BaseAgent(ABC):
 
             seen_ids.add(call_id)
             valid.append(tc)
+
+        if len(valid) != len(tool_calls):
+            log_event(
+                self.config.log_file,
+                "tool_calls_validated",
+                thread_id=thread_id,
+                input_count=len(tool_calls),
+                valid_count=len(valid),
+                dropped_count=len(tool_calls) - len(valid),
+            )
         return valid
 
 
@@ -336,8 +472,25 @@ class BaseAgent(ABC):
         tool response.
         """
         thread_id = _thread_id()
+        node_started_at = time.monotonic()
+
+        log_event(
+            self.config.log_file,
+            "node_entered",
+            node="confirmation",
+            thread_id=thread_id,
+        )
+
         last_ai = _last_ai_message_with_tool_calls(state.messages)
         if last_ai is None or not last_ai.tool_calls:
+            log_event(
+                self.config.log_file,
+                "node_exited",
+                node="confirmation",
+                thread_id=thread_id,
+                reason="no_pending_tool_calls",
+                duration_ms=int((time.monotonic() - node_started_at) * 1000),
+            )
             return {}
 
         valid_calls = self._dedup_and_validate_tool_calls(last_ai.tool_calls, thread_id)
@@ -353,6 +506,15 @@ class BaseAgent(ABC):
             if not needs_confirmation(name, args, confirm_all=self.config.confirm_all_tools):
                 kept_calls.append(tc)
                 continue
+
+            log_event(
+                self.config.log_file,
+                "tool_confirmation_requested",
+                thread_id=thread_id,
+                tool_name=name,
+                call_id=call_id,
+                args=safe_args(args),
+            )
 
             request = ConfirmationRequest(
                 tool_name=name,
@@ -385,14 +547,43 @@ class BaseAgent(ABC):
                 )
 
         updated_ai = last_ai.model_copy(update={"tool_calls": kept_calls})
+
+        log_event(
+            self.config.log_file,
+            "node_exited",
+            node="confirmation",
+            thread_id=thread_id,
+            reason="confirmation_processed",
+            kept_call_count=len(kept_calls),
+            denied_call_count=len(denial_messages),
+            duration_ms=int((time.monotonic() - node_started_at) * 1000),
+        )
+
         return {"messages": [updated_ai, *denial_messages]}
 
 
     def tool_node(self, state: AgentState) -> dict[str, Any]:
         """Execute whatever tool calls survived confirmation_node."""
         thread_id = _thread_id()
+        node_started_at = time.monotonic()
+
+        log_event(
+            self.config.log_file,
+            "node_entered",
+            node="tools",
+            thread_id=thread_id,
+        )
+
         last_ai = _last_ai_message_with_tool_calls(state.messages)
         if last_ai is None or not last_ai.tool_calls:
+            log_event(
+                self.config.log_file,
+                "node_exited",
+                node="tools",
+                thread_id=thread_id,
+                reason="no_tool_calls_to_execute",
+                duration_ms=int((time.monotonic() - node_started_at) * 1000),
+            )
             return {}
 
         valid_calls = self._dedup_and_validate_tool_calls(last_ai.tool_calls, thread_id)
@@ -404,11 +595,19 @@ class BaseAgent(ABC):
             call_id = tc["id"]
             name = tc["name"]
             args = tc.get("args") or {}
+            call_started_at = time.monotonic()
 
             tool = self.tools_by_name.get(name)
             if tool is None:
                 output = f"ERROR: unknown tool '{name}'. Valid tools: {', '.join(sorted(self.tools_by_name))}"
                 success = False
+                log_event(
+                    self.config.log_file,
+                    "tool_call_unknown_tool",
+                    thread_id=thread_id,
+                    tool_name=name,
+                    call_id=call_id,
+                )
             else:
                 try:
                     raw_output = tool.invoke(args)
@@ -429,6 +628,7 @@ class BaseAgent(ABC):
                 tool_name=name,
                 success=success,
                 args=safe_args(args),
+                duration_ms=int((time.monotonic() - call_started_at) * 1000),
             )
 
             tool_messages.append(
@@ -441,16 +641,56 @@ class BaseAgent(ABC):
                 "success": success,
             })
 
+        log_event(
+            self.config.log_file,
+            "node_exited",
+            node="tools",
+            thread_id=thread_id,
+            reason="tool_calls_executed",
+            call_count=len(tool_logs),
+            success_count=sum(1 for t in tool_logs if t["success"]),
+            failure_count=sum(1 for t in tool_logs if not t["success"]),
+            duration_ms=int((time.monotonic() - node_started_at) * 1000),
+        )
+
         return {"messages": tool_messages, "tool_logs": tool_logs}
 
 
     def route_after_agent(self, state: AgentState) -> Literal["confirmation", "end"]:
+        thread_id = _thread_id()
+
         if state.status in {"cancelled", "error", "max_iterations_reached"}:
+            log_event(
+                self.config.log_file,
+                "route_decided",
+                thread_id=thread_id,
+                from_node="agent",
+                to_node="end",
+                reason=f"terminal_status:{state.status}",
+            )
             return "end"
 
         last = state.messages[-1] if state.messages else None
         if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            log_event(
+                self.config.log_file,
+                "route_decided",
+                thread_id=thread_id,
+                from_node="agent",
+                to_node="confirmation",
+                reason="pending_tool_calls",
+                tool_call_count=len(last.tool_calls),
+            )
             return "confirmation"
+
+        log_event(
+            self.config.log_file,
+            "route_decided",
+            thread_id=thread_id,
+            from_node="agent",
+            to_node="end",
+            reason="no_tool_calls",
+        )
         return "end"
 
 
@@ -469,4 +709,14 @@ class BaseAgent(ABC):
         graph.add_edge("confirmation", "tools")
         graph.add_edge("tools", "agent")
 
-        return graph.compile(checkpointer=checkpointer or InMemorySaver())
+        compiled = graph.compile(checkpointer=checkpointer or InMemorySaver())
+
+        log_event(
+            self.config.log_file,
+            "agent_graph_built",
+            task_mode=self.TASK_MODE,
+            nodes=["agent", "confirmation", "tools"],
+            using_provided_checkpointer=checkpointer is not None,
+        )
+
+        return compiled
