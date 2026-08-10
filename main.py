@@ -6,6 +6,7 @@ Run with:
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,12 @@ from config import Config
 from database.service.persistence import DatabaseLogService
 
 
+PROVIDER_LABELS = {
+    "api": "API (SambaNova → OpenRouter → Groq → Ollama fallback)",
+    "local": "Local (Ollama only)",
+}
+
+
 @dataclass
 class Conversation:
     """UI metadata for one LangGraph thread."""
@@ -27,6 +34,7 @@ class Conversation:
     thread_id: str
     agent_key: str
     title: str
+    provider: str
     sandbox_enabled: bool
     database_enabled: bool
     state: Mapping[str, Any] | None = None
@@ -43,14 +51,14 @@ def _initialise_session() -> None:
         st.session_state.active_thread_id = None
 
 
-def _get_runner(*, sandbox_enabled: bool, database_enabled: bool) -> AgentRunner | None:
+def _get_runner(*, provider: str, sandbox_enabled: bool, database_enabled: bool) -> AgentRunner | None:
     """Return a checkpoint-preserving runner for the chosen integrations."""
-    integration_key = (sandbox_enabled, database_enabled)
+    integration_key = (provider, sandbox_enabled, database_enabled)
     if integration_key in st.session_state.runners:
         return st.session_state.runners[integration_key]
 
     try:
-        config = Config.from_env()
+        config = Config.from_env(provider=provider)
         storage = None
         if database_enabled:
             service = DatabaseLogService(config.postgres_url, echo=config.postgres_echo)
@@ -66,9 +74,46 @@ def _get_runner(*, sandbox_enabled: bool, database_enabled: bool) -> AgentRunner
     return runner
 
 
+def _postgres_url() -> str:
+    return os.environ.get(
+        "POSTGRES_URL",
+        "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent",
+    )
+
+
+def _get_history_storage() -> AgentStorage | None:
+    """Read-only storage used only to list/restore past conversations."""
+    if "history_storage" in st.session_state:
+        return st.session_state.history_storage
+    if st.session_state.get("history_storage_unavailable"):
+        return None
+
+    try:
+        service = DatabaseLogService(_postgres_url(), echo=False)
+        service.init_db()
+        storage = AgentStorage(service)
+    except Exception as exc:
+        st.session_state.history_storage_unavailable = True
+        st.session_state.history_storage_error = str(exc)
+        return None
+
+    st.session_state.history_storage = storage
+    st.session_state.pop("history_storage_unavailable", None)
+    st.session_state.pop("history_storage_error", None)
+    return storage
+
+
+def _retry_history_storage() -> None:
+    """Let the user retry connecting after fixing the database."""
+    st.session_state.pop("history_storage", None)
+    st.session_state.pop("history_storage_unavailable", None)
+    st.session_state.pop("history_storage_error", None)
+
+
 def _new_conversation(
     agent_key: str,
     *,
+    provider: str,
     sandbox_enabled: bool,
     database_enabled: bool,
 ) -> Conversation:
@@ -76,6 +121,7 @@ def _new_conversation(
         thread_id=uuid.uuid4().hex,
         agent_key=agent_key,
         title="New conversation",
+        provider=provider,
         sandbox_enabled=sandbox_enabled,
         database_enabled=database_enabled,
     )
@@ -87,6 +133,7 @@ def _new_conversation(
 def _active_conversation(
     agent_key: str,
     *,
+    provider: str,
     sandbox_enabled: bool,
     database_enabled: bool,
 ) -> Conversation:
@@ -97,35 +144,39 @@ def _active_conversation(
     if (
         conversation is None
         or conversation.agent_key != agent_key
+        or conversation.provider != provider
         or conversation.sandbox_enabled != sandbox_enabled
         or conversation.database_enabled != database_enabled
     ):
         return _new_conversation(
             agent_key,
+            provider=provider,
             sandbox_enabled=sandbox_enabled,
             database_enabled=database_enabled,
         )
     return conversation
 
 
-def _restore_persisted_conversations(runner: AgentRunner | None, agent_key: str) -> None:
+def _restore_persisted_conversations(storage: AgentStorage | None, agent_key: str) -> None:
     """Add database transcripts to session state without recreating a graph checkpoint."""
-    if runner is None or runner.storage is None:
+    if storage is None:
         return
     try:
-        for row in runner.storage.list_conversations(agent_key=agent_key):
+        for row in storage.list_conversations(agent_key=agent_key):
             database_session_id = int(row["id"])
             thread_id = f"database-{database_session_id}"
-            if thread_id in st.session_state.conversations:
+            existing = st.session_state.conversations.get(thread_id)
+            if existing is not None:
                 continue
             st.session_state.conversations[thread_id] = Conversation(
                 thread_id=thread_id,
                 agent_key=str(row["agent_type"]),
                 title=str(row["title"]),
+                provider="",
                 sandbox_enabled=False,
                 database_enabled=True,
                 state={
-                    "messages": runner.storage.load_messages(database_session_id),
+                    "messages": storage.load_messages(database_session_id),
                     "status": "stored transcript",
                     "iterations": 0,
                 },
@@ -133,7 +184,7 @@ def _restore_persisted_conversations(runner: AgentRunner | None, agent_key: str)
                 restored=True,
             )
     except Exception as exc:
-        runner.storage.last_error = str(exc)
+        storage.last_error = str(exc)
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -213,7 +264,7 @@ def _render_confirmations(runner: AgentRunner | None, conversation: Conversation
                     conversation.state = result.state
                     conversation.database_session_id = result.database_session_id
                     st.rerun()
-                except Exception as exc:  # Keep the paused state available for retry.
+                except Exception as exc:
                     st.error(f"Could not resume the agent: {exc}")
 
 
@@ -247,6 +298,14 @@ def main() -> None:
         selected_option = next(option for option in options if option.key == selected_agent)
         st.caption(selected_option.description)
 
+        # Provider Selection UI Control
+        selected_provider = st.selectbox(
+            "LLM Provider",
+            options=list(PROVIDER_LABELS.keys()),
+            format_func=lambda key: PROVIDER_LABELS[key],
+            help="Choose 'api' for cloud APIs with fallback, or 'local' to run Ollama locally.",
+        )
+
         project_path = st.text_input("Project folder", placeholder=str(Path.cwd()))
         selected_file = st.text_input("Relevant file or folder", placeholder="Optional path or filename")
 
@@ -267,7 +326,11 @@ def main() -> None:
         if database_enabled:
             st.caption("Uses the `postgres_url` configured in your environment.")
 
-    runner = _get_runner(sandbox_enabled=sandbox_enabled, database_enabled=database_enabled)
+    runner = _get_runner(
+        provider=selected_provider,
+        sandbox_enabled=sandbox_enabled,
+        database_enabled=database_enabled,
+    )
     if database_enabled:
         _restore_persisted_conversations(runner, selected_agent)
 
@@ -281,7 +344,8 @@ def main() -> None:
             and (
                 saved.restored
                 or (
-                    saved.sandbox_enabled == sandbox_enabled
+                    saved.provider == selected_provider
+                    and saved.sandbox_enabled == sandbox_enabled
                     and saved.database_enabled == database_enabled
                 )
             )
@@ -301,6 +365,7 @@ def main() -> None:
         if st.button("New conversation", icon=":material/add:", width="stretch"):
             _new_conversation(
                 selected_agent,
+                provider=selected_provider,
                 sandbox_enabled=sandbox_enabled,
                 database_enabled=database_enabled,
             )
@@ -308,11 +373,14 @@ def main() -> None:
 
     conversation = _active_conversation(
         selected_agent,
+        provider=selected_provider,
         sandbox_enabled=sandbox_enabled,
         database_enabled=database_enabled,
     )
 
-    runner_error = st.session_state.runner_errors.get((sandbox_enabled, database_enabled))
+    runner_error = st.session_state.runner_errors.get(
+        (selected_provider, sandbox_enabled, database_enabled)
+    )
     if runner_error:
         st.error(
             "The selected configuration could not start. Set `SAMBANOVA_API_KEY`, `GROQ_API_KEY`, "
@@ -338,12 +406,13 @@ def main() -> None:
     prompt = st.chat_input("Describe the task for the selected agent")
     if prompt:
         if runner is None:
-            st.error("Configure the API keys before starting a conversation.")
+            st.error("Configure the required provider keys before starting a conversation.")
             return
 
         if conversation.restored:
             conversation = _new_conversation(
                 selected_agent,
+                provider=selected_provider,
                 sandbox_enabled=sandbox_enabled,
                 database_enabled=database_enabled,
             )

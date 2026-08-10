@@ -11,6 +11,12 @@ class BackendAgent(BaseAgent):
     """Flask/FastAPI and general backend-development workflow."""
 
     TASK_MODE = "backend"
+    MD_FILENAME = "backend_agent.md"
+    FALLBACK_SYSTEM_PROMPT = (
+        "You are a backend coding agent. Inspect before editing, use only the provided "
+        "tools, and verify changes with tests or an HTTP request when appropriate. "
+        "Never claim a change succeeded unless its tool result confirms it."
+    )
 
 
 def build_backend_graph(

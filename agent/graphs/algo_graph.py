@@ -12,6 +12,11 @@ class AlgoAgent(BaseAgent):
 
     TASK_MODE = "algorithms"
     MD_FILENAME = "algo_agent.md"
+    FALLBACK_SYSTEM_PROMPT = (
+        "You are an algorithms agent. State complexity targets before implementing, test "
+        "edge cases, run the code to verify correctness, and state the final complexity "
+        "explicitly."
+    )
 
 
 def build_algo_graph(

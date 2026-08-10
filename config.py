@@ -1,7 +1,7 @@
 import os
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator
 
 try:
     from dotenv import load_dotenv
@@ -24,15 +24,15 @@ VALID_AGENT_TYPES = ("backend", "ml", "git", "algorithms")
 class Config(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    sambanova_api_key: SecretStr
+    sambanova_api_key: Optional[SecretStr] = None
     sambanova_base_url: str = "https://api.sambanova.ai/v1"
     sambanova_model: str = DEFAULT_SAMBANOVA_MODAL
 
-    groq_api_key: SecretStr
+    groq_api_key: Optional[SecretStr] = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = DEFAULT_GROQ_MODEL
 
-    openrouter_api_key: SecretStr
+    openrouter_api_key: Optional[SecretStr] = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL
 
@@ -84,8 +84,8 @@ class Config(BaseModel):
         "openrouter_api_key"
     )
     @classmethod
-    def _key_not_empty(cls, v: SecretStr) -> SecretStr:
-        if not v.get_secret_value().strip():
+    def _key_not_empty(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        if v is not None and not v.get_secret_value().strip():
             raise ValueError("api key is empty")
         return v
 
@@ -160,6 +160,30 @@ class Config(BaseModel):
             raise ValueError("must be a positive number")
         return v
 
+
+    @model_validator(mode="after")
+    def _require_api_keys_for_api_provider(self) -> "Config":
+        """provider='api' needs every fallback key; provider='local' needs none."""
+        if self.provider != "api":
+            return self
+
+        missing = [
+            env_name
+            for env_name, key in (
+                ("SAMBANOVA_API_KEY", self.sambanova_api_key),
+                ("GROQ_API_KEY", self.groq_api_key),
+                ("OPENROUTER_API_KEY", self.openrouter_api_key),
+            )
+            if key is None or not key.get_secret_value().strip()
+        ]
+        if missing:
+            raise ValueError(
+                "provider='api' requires these keys: " + ", ".join(missing) +
+                ". Set them, or construct Config with provider='local' to use Ollama only."
+            )
+        return self
+
+
     def get_keys_str(self) -> tuple[str, str, str]:
         return (
             self.openrouter_api_key.get_secret_value().strip() if self.openrouter_api_key else "",
@@ -185,20 +209,23 @@ class Config(BaseModel):
 
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls, provider: Optional[str] = None) -> "Config":
+        resolved_provider = (provider or os.environ.get("AGENT_PROVIDER", "api")).strip().lower()
+
         sambanova_key = os.environ.get("SAMBANOVA_API_KEY", "")
         groq_key = os.environ.get("GROQ_API_KEY", "")
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
 
-        required_keys = {
-            "SAMBANOVA_API_KEY": sambanova_key,
-            "GROQ_API_KEY": groq_key,
-            "OPENROUTER_API_KEY": openrouter_key
-        }
+        if resolved_provider == "api":
+            required_keys = {
+                "SAMBANOVA_API_KEY": sambanova_key,
+                "GROQ_API_KEY": groq_key,
+                "OPENROUTER_API_KEY": openrouter_key
+            }
 
-        for key_name, key_val in required_keys.items():
-            if not key_val:
-                raise ValueError(f"{key_name} not found in environment.")
+            for key_name, key_val in required_keys.items():
+                if not key_val:
+                    raise ValueError(f"{key_name} not found in environment.")
 
         enable_ollama = os.environ.get(
             "AGENT_ENABLE_OLLAMA_FALLBACK", "true"
@@ -209,18 +236,19 @@ class Config(BaseModel):
         ).strip().lower() in ("1", "true", "yes", "on")
 
         return cls(
-            sambanova_api_key=SecretStr(sambanova_key),
+            sambanova_api_key=SecretStr(sambanova_key) if sambanova_key else None,
             sambanova_base_url=os.environ.get("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1"),
 
-            groq_api_key=SecretStr(groq_key),
+            groq_api_key=SecretStr(groq_key) if groq_key else None,
             groq_base_url=os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
 
-            openrouter_api_key=SecretStr(openrouter_key),
+            openrouter_api_key=SecretStr(openrouter_key) if openrouter_key else None,
             openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 
             enable_ollama_fallback=enable_ollama,
             confirm_all_tools=confirm_all,
 
+            provider=resolved_provider,
             agent_type=os.environ.get("AGENT_TYPE", "backend"),
 
             backend_model_name=os.environ.get("BACKEND_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),

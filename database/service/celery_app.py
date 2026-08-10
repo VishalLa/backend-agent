@@ -19,6 +19,7 @@ def create_celery_app(
         "coding_agent_database",
         broker=broker_url or os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0"),
         backend=result_backend or os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
+        include=["database.service.tasks"],
     )
     app.conf.update(
         task_serializer="json",
