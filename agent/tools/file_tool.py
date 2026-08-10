@@ -30,7 +30,9 @@ def _load_gitignore(root: Path):
 def read_file(
     path: str,
     start_line: Optional[int] = None,
-    end_line: Optional[int] = None
+    end_line: Optional[int] = None,
+    line_start: Optional[int] = None,
+    line_end: Optional[int] = None,
 ) -> str:
     """Read a file with line numbers. If no range given and file >300 lines,
     returns first 300 lines only + how many more exist.
@@ -39,7 +41,24 @@ def read_file(
         path: File path.
         start_line: 1-indexed start (inclusive).
         end_line: 1-indexed end (inclusive).
+        line_start: Backward-compatible alias for ``start_line``.
+        line_end: Backward-compatible alias for ``end_line``.
     """
+    if start_line is not None and line_start is not None and start_line != line_start:
+        return "ERROR: provide only one of start_line or line_start (or use the same value for both)."
+    if end_line is not None and line_end is not None and end_line != line_end:
+        return "ERROR: provide only one of end_line or line_end (or use the same value for both)."
+
+    start_line = start_line if start_line is not None else line_start
+    end_line = end_line if end_line is not None else line_end
+
+    if start_line is not None and start_line < 1:
+        return "ERROR: start_line must be at least 1."
+    if end_line is not None and end_line < 1:
+        return "ERROR: end_line must be at least 1."
+    if start_line is not None and end_line is not None and end_line < start_line:
+        return "ERROR: end_line must be greater than or equal to start_line."
+
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines(keepends=True)
     except FileNotFoundError:
@@ -55,7 +74,7 @@ def read_file(
         start, end = 0, DEFAULT_MAX_READ_LINES
         capped_note = (
             f"\n... [showing line1-{DEFAULT_MAX_READ_LINES} of {total}; "
-            f"pass start_line/end_line to read more, eg. start_line={DEFAULT_MAX_READ_LINES + 1}]"
+            f"pass start_line/end_line to read more, e.g. start_line={DEFAULT_MAX_READ_LINES + 1}]"
         )
 
     else:

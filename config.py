@@ -55,7 +55,7 @@ class Config(BaseModel):
 
     temperature: float = 0.1
     max_tokens: int = 4096
-    max_iterations: int = 7
+    max_iterations: int = 10
     request_timeout: float = 60.0
     max_retries: int = 3
     retry_backoff_seconds: float = 2.0

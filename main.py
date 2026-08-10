@@ -31,6 +31,7 @@ class Conversation:
     database_enabled: bool
     state: Mapping[str, Any] | None = None
     database_session_id: int | None = None
+    restored: bool = False
 
 
 def _initialise_session() -> None:
@@ -91,6 +92,8 @@ def _active_conversation(
 ) -> Conversation:
     thread_id = st.session_state.active_thread_id
     conversation = st.session_state.conversations.get(thread_id)
+    if conversation is not None and conversation.restored:
+        return conversation
     if (
         conversation is None
         or conversation.agent_key != agent_key
@@ -103,6 +106,34 @@ def _active_conversation(
             database_enabled=database_enabled,
         )
     return conversation
+
+
+def _restore_persisted_conversations(runner: AgentRunner | None, agent_key: str) -> None:
+    """Add database transcripts to session state without recreating a graph checkpoint."""
+    if runner is None or runner.storage is None:
+        return
+    try:
+        for row in runner.storage.list_conversations(agent_key=agent_key):
+            database_session_id = int(row["id"])
+            thread_id = f"database-{database_session_id}"
+            if thread_id in st.session_state.conversations:
+                continue
+            st.session_state.conversations[thread_id] = Conversation(
+                thread_id=thread_id,
+                agent_key=str(row["agent_type"]),
+                title=str(row["title"]),
+                sandbox_enabled=False,
+                database_enabled=True,
+                state={
+                    "messages": runner.storage.load_messages(database_session_id),
+                    "status": "stored transcript",
+                    "iterations": 0,
+                },
+                database_session_id=database_session_id,
+                restored=True,
+            )
+    except Exception as exc:
+        runner.storage.last_error = str(exc)
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -236,26 +267,35 @@ def main() -> None:
         if database_enabled:
             st.caption("Uses the `postgres_url` configured in your environment.")
 
+    runner = _get_runner(sandbox_enabled=sandbox_enabled, database_enabled=database_enabled)
+    if database_enabled:
+        _restore_persisted_conversations(runner, selected_agent)
+
+    with st.sidebar:
         st.divider()
         st.header("Previous conversations")
         matching = [
-            conversation
-            for conversation in st.session_state.conversations.values()
-            if (
-                conversation.agent_key == selected_agent
-                and conversation.sandbox_enabled == sandbox_enabled
-                and conversation.database_enabled == database_enabled
+            saved
+            for saved in st.session_state.conversations.values()
+            if saved.agent_key == selected_agent
+            and (
+                saved.restored
+                or (
+                    saved.sandbox_enabled == sandbox_enabled
+                    and saved.database_enabled == database_enabled
+                )
             )
         ]
-        for conversation in reversed(matching):
-            active = conversation.thread_id == st.session_state.active_thread_id
+        for saved in reversed(matching):
+            active = saved.thread_id == st.session_state.active_thread_id
+            suffix = " · stored" if saved.restored else ""
             if st.button(
-                conversation.title,
-                key=f"conversation-{conversation.thread_id}",
+                f"{saved.title}{suffix}",
+                key=f"conversation-{saved.thread_id}",
                 type="primary" if active else "secondary",
                 width="stretch",
             ):
-                st.session_state.active_thread_id = conversation.thread_id
+                st.session_state.active_thread_id = saved.thread_id
                 st.rerun()
 
         if st.button("New conversation", icon=":material/add:", width="stretch"):
@@ -266,7 +306,6 @@ def main() -> None:
             )
             st.rerun()
 
-    runner = _get_runner(sandbox_enabled=sandbox_enabled, database_enabled=database_enabled)
     conversation = _active_conversation(
         selected_agent,
         sandbox_enabled=sandbox_enabled,
@@ -301,6 +340,14 @@ def main() -> None:
         if runner is None:
             st.error("Configure the API keys before starting a conversation.")
             return
+
+        if conversation.restored:
+            conversation = _new_conversation(
+                selected_agent,
+                sandbox_enabled=sandbox_enabled,
+                database_enabled=database_enabled,
+            )
+            st.info("Started a new conversation from the stored transcript. LangGraph checkpoints are only available while the original app session is running.")
 
         context = _project_context(project_path, selected_file)
         full_prompt = f"{context}\n\nTask: {prompt}" if context else prompt

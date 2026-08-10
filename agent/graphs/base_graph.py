@@ -412,7 +412,11 @@ class BaseAgent(ABC):
             else:
                 try:
                     raw_output = tool.invoke(args)
-                    output = _truncate(raw_output, continuation_hint_tool=name)
+                    output = (
+                        str(raw_output)
+                        if name == "read_file"
+                        else _truncate(raw_output, continuation_hint_tool=name)
+                    )
                     success = True
                 except Exception as exc:  # noqa: BLE001 - tool errors are reported to the model, not raised
                     output = f"ERROR: tool '{name}' raised an exception: {exc}"

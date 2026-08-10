@@ -15,3 +15,4 @@ test.*
 test
 .vscode
 .agents
+*.log

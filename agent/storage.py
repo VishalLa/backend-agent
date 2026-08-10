@@ -115,6 +115,42 @@ class AgentStorage:
         return self._session_ids.get(thread_id)
 
 
+    def list_conversations(
+        self,
+        *,
+        agent_key: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Expose persisted conversation metadata for a frontend."""
+        return self.service.list_sessions(agent_type=agent_key, limit=limit)
+
+
+    def load_messages(self, session_id: int) -> list[BaseMessage]:
+        """Hydrate stored rows into display-ready LangChain messages.
+
+        A database record contains a transcript, not LangGraph's in-memory
+        checkpoint. Restored transcripts are therefore display-only; a new
+        thread is used when the user submits another task.
+        """
+        messages: list[BaseMessage] = []
+        for row in self.service.list_messages(session_id):
+            content = str(row["content"])
+            role = row["role"]
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "tool":
+                messages.append(
+                    ToolMessage(
+                        content=content,
+                        tool_call_id=f"stored-tool-{row['id']}",
+                        name="stored tool",
+                    )
+                )
+        return messages
+
+
     def _record_message(
         self, 
         session_id: int, 

@@ -52,6 +52,56 @@ class DatabaseLogService:
         self.manager.init_db()
 
 
+    def list_sessions(
+        self,
+        *,
+        agent_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return recent persisted conversations for the dashboard sidebar."""
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+
+        statement = select(Session).order_by(Session.updated_at.desc()).limit(limit)
+        if agent_type:
+            statement = statement.where(Session.agent_type == agent_type)
+
+        with self.manager.session_scope() as db:
+            rows = db.scalars(statement).all()
+            return [
+                {
+                    "id": row.id,
+                    "title": row.title or "Untitled conversation",
+                    "project_path": row.project_path,
+                    "agent_type": row.agent_type.value,
+                    "status": row.status.value,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                }
+                for row in rows
+            ]
+
+
+    def list_messages(self, session_id: int) -> list[dict[str, Any]]:
+        """Return one persisted transcript in chronological order."""
+        session_id = _required_id({"id": session_id}, "id")
+        statement = (
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.created_at.asc(), Message.id.asc())
+        )
+        with self.manager.session_scope() as db:
+            return [
+                {
+                    "id": row.id,
+                    "role": row.role.value,
+                    "content": row.content,
+                    "created_at": row.created_at,
+                }
+                for row in db.scalars(statement).all()
+            ]
+
+
     def persist_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate and persist a supported event; return its database identity.
 
