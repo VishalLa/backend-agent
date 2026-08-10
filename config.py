@@ -7,7 +7,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass 
+    pass
 
 
 # api provider
@@ -17,6 +17,9 @@ DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 # local
 DEFAULT_OLLAMA_MODEL = "gpt-oss:20b"
 SUMMARY_MODAL = "phi4-mini-reasoning"
+
+VALID_AGENT_TYPES = ("backend", "ml", "git", "algorithms")
+
 
 class Config(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -34,11 +37,11 @@ class Config(BaseModel):
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL
 
     enable_ollama_fallback: bool = True
-    ollama_base_url = "http://localhost:11434"
+    ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     ollama_summary_model: str = SUMMARY_MODAL
 
-    ollama_num_ctx: int = 8192 
+    ollama_num_ctx: int = 8192
     ollama_num_predict: int = 4096
     ollama_keep_alive: str = "10m"
     ollama_num_thread: Optional[int] = None
@@ -58,6 +61,12 @@ class Config(BaseModel):
     agent_type: str = "backend"
     provider: str = "api"
 
+    # per-task-type model overrides
+    backend_model_name: str = DEFAULT_SAMBANOVA_MODAL
+    ml_model_name: str = DEFAULT_SAMBANOVA_MODAL
+    git_model_name: str = DEFAULT_GROQ_MODEL
+    algo_model_name: str = DEFAULT_SAMBANOVA_MODAL
+
     postgres_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"
     postgres_pool_size: int = 5
     postgres_echo: bool = False
@@ -74,7 +83,7 @@ class Config(BaseModel):
     @classmethod
     def _key_not_empty(cls, v: SecretStr) -> SecretStr:
         if not v.get_secret_value().strip():
-            raise ValueError(f"{v} is empty")
+            raise ValueError("api key is empty")
         return v
 
     @field_validator(
@@ -82,30 +91,34 @@ class Config(BaseModel):
         "groq_model",
         "openrouter_model",
         "ollama_model",
-        "ollama_summary_model"
+        "ollama_summary_model",
+        "backend_model_name",
+        "ml_model_name",
+        "git_model_name",
+        "algo_model_name",
     )
     @classmethod
     def _model_not_empty(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("model name must not tbe empty")
+            raise ValueError("model name must not be empty")
         return v
 
-    
+
     @field_validator("agent_type")
     @classmethod
     def _valid_agent_type(cls, v: str) -> str:
         v = v.strip().lower()
-        if v not in ("backend", "ml"):
-            raise ValueError("agent_type must be 'backend' or 'ml'")
+        if v not in VALID_AGENT_TYPES:
+            raise ValueError(f"agent_type must be one of {VALID_AGENT_TYPES}")
         return v
-    
 
-    @field_validator("provider_mode")
+
+    @field_validator("provider")
     @classmethod
-    def _valid_provider_mode(cls, v: str) -> str:
+    def _valid_provider(cls, v: str) -> str:
         v = v.strip().lower()
         if v not in ("api", "local"):
-            raise ValueError("provider_mode must be 'api' or 'local'")
+            raise ValueError("provider must be 'api' or 'local'")
         return v
 
 
@@ -116,12 +129,12 @@ class Config(BaseModel):
             raise ValueError("temperature must be between 0 and 2")
         return v
 
-    
+
     @field_validator(
-        "max_tokens", 
-        "max_iterations", 
-        "max_retries", 
-        "ollama_num_ctx", 
+        "max_tokens",
+        "max_iterations",
+        "max_retries",
+        "ollama_num_ctx",
         "ollama_num_predict"
     )
     @classmethod
@@ -132,8 +145,8 @@ class Config(BaseModel):
 
 
     @field_validator(
-        "request_timeout", 
-        "retry_backoff_seconds", 
+        "request_timeout",
+        "retry_backoff_seconds",
         "ollama_request_timeout"
     )
     @classmethod
@@ -141,13 +154,22 @@ class Config(BaseModel):
         if v <= 0:
             raise ValueError("must be a positive number")
         return v
-    
+
     def get_keys_str(self) -> tuple[str, str, str]:
         return (
             self.openrouter_api_key.get_secret_value().strip() if self.openrouter_api_key else "",
             self.groq_api_key.get_secret_value().strip() if self.groq_api_key else "",
             self.sambanova_api_key.get_secret_value() if self.sambanova_api_key else ""
         )
+
+    def get_model_for_task(self, task_mode: str) -> str:
+        from task_profile import TASK_PROFILES
+
+        profile = TASK_PROFILES.get(task_mode)
+        if profile is None:
+            return self.sambanova_model
+        field_name = profile.get("model_field")
+        return getattr(self, field_name, self.sambanova_model)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -166,11 +188,12 @@ class Config(BaseModel):
                 raise ValueError(f"{key_name} not found in environment.")
 
         enable_ollama = os.environ.get(
-            ("AGENT_ENABLE_OLLAMA_FALLBACK").strip().lower() not in ("0", "false", "no", "off")
-        )
+            "AGENT_ENABLE_OLLAMA_FALLBACK", "true"
+        ).strip().lower() not in ("0", "false", "no", "off")
+
         confirm_all = os.environ.get(
-            ("AGENT_CONFIRM_ALL_TOOLS", "false").strip().lower() in ("1", "true", "yes", "on")
-        )
+            "AGENT_CONFIRM_ALL_TOOLS", "false"
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         return cls(
             sambanova_api_key=SecretStr(sambanova_key),
@@ -183,5 +206,12 @@ class Config(BaseModel):
             openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 
             enable_ollama_fallback=enable_ollama,
-            confirm_all_tools=confirm_all
+            confirm_all_tools=confirm_all,
+
+            agent_type=os.environ.get("AGENT_TYPE", "backend"),
+
+            backend_model_name=os.environ.get("BACKEND_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
+            ml_model_name=os.environ.get("ML_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
+            git_model_name=os.environ.get("GIT_MODEL_NAME", DEFAULT_GROQ_MODEL),
+            algo_model_name=os.environ.get("ALGO_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
         )

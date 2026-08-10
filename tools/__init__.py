@@ -7,7 +7,7 @@ from .shell_tool import run_shell_command
 from .system_tool import check_gpu_status, delete_path, launch_background_process, tail_log
 
 
-BACKEND_TOOLS = ALGO_TOOLS = [
+BACKEND_TOOLS = [
     run_shell_command,
 
     read_file,
@@ -15,14 +15,16 @@ BACKEND_TOOLS = ALGO_TOOLS = [
     append_file,
     edit_file,
     list_dir,
-	delete_path,
+    delete_path,
 
     ripgrep_search,
     web_search,
 
     http_request,
-    fetch_openapi_schema
+    fetch_openapi_schema,
 ]
+
+ALGO_TOOLS = list(BACKEND_TOOLS)
 
 GIT_TOOLS = [
     git_status,
@@ -53,4 +55,11 @@ ML_TOOLS = [
     delete_path,
 ]
 
-__all__ = ["BACKEND_TOOLS", "ALGO_TOOLS", "GIT_TOOLS", "ML_TOOLS"]
+TOOLS_BY_TASK = {
+    "backend": BACKEND_TOOLS,
+    "ml": ML_TOOLS,
+    "git": GIT_TOOLS,
+    "algorithms": ALGO_TOOLS,
+}
+
+__all__ = ["BACKEND_TOOLS", "ALGO_TOOLS", "GIT_TOOLS", "ML_TOOLS", "TOOLS_BY_TASK"]

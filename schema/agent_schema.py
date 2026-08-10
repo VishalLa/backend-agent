@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .base import SchemaBase
 
-Status = str
 
 class ToolCallLog(SchemaBase):
 	"""
@@ -37,7 +36,7 @@ class ConfirmationRequest(SchemaBase):
     human approval is required.
     """
 	
-	tool_name: str = Field(..., min_length=1, max_digits=128)
+	tool_name: str = Field(..., min_length=1, max_length=128)
 	tool_args: dict[str, Any] = Field(default_factory=dict)
 	call_id: str = Field(..., min_length=1, max_length=255)
 	reason: str = Field(
@@ -79,9 +78,9 @@ class AgentResult(SchemaBase):
     """
 
 	output: str
-	Status: str
+	status: str
 	iterations: int = Field(default=0, ge=0)
-	tool_calls: list[ToolCallLog] = Field(..., min_length=1)
+	tool_calls: list[ToolCallLog] = Field(default_factory=list)
 	thread_id: str = Field(..., min_length=1)
 	error: Optional[str] = None
 

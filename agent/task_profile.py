@@ -49,7 +49,7 @@ TASK_PROFILES = {
         }
     },
     "algorithms": {
-        "model_filed": "algo_model_name",
+        "model_field": "algo_model_name",
         "description": "complex algo work flow",
         "tool_names": {
             "run_shell_command",

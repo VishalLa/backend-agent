@@ -1,4 +1,5 @@
 import httpx
+from typing import Optional
 from langchain_core.tools import tool
 
 
@@ -6,8 +7,8 @@ from langchain_core.tools import tool
 def http_request(
     url: str,
     method: str = "GET",
-    json_body: dict = None,
-    headers: dict = None,
+    json_body: Optional[dict] = None,
+    headers: Optional[dict] = None,
     timeout: int = 15,
 ) -> str:
     """Send an HTTP request to a local app; returns status, headers, body.

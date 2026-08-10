@@ -50,13 +50,13 @@ def read_file(
 
     if start_line is None and end_line is None and total > DEFAULT_MAX_READ_LINES:
         start, end = 0, DEFAULT_MAX_READ_LINES
-        capped_note = {
+        capped_note = (
             f"\n... [showing line1-{DEFAULT_MAX_READ_LINES} of {total}; "
             f"pass start_line/end_line to read more, eg. start_line={DEFAULT_MAX_READ_LINES + 1}]"
-        }
+        )
 
     else:
-        start = max(0, (start - 1) if start_line else 0)
+        start = max(0, (start_line - 1) if start_line else 0)
         requested_end = min(total, end_line if end_line else total)
         end = min(requested_end, start + DEFAULT_MAX_READ_LINES)
 
@@ -114,7 +114,7 @@ def append_file(
         create_if_missing: Create the file if it doesn't exist. Default True.
     """
 
-    p = Path(Path)
+    p = Path(path)
     if not p.exists():
         if not create_if_missing:
             return f"ERROR: {path} does not exist. Pass create_if_missing=True or use write_file first."
@@ -150,7 +150,7 @@ def edit_file(
     """
 
     try:
-        content = Path(path).read_text(encoding="uft-8")
+        content = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return f"ERROR: file not found: {path}"
     except Exception as e:
@@ -169,7 +169,7 @@ def edit_file(
     if count > 1:
         return f"ERROR: old_str is not unique ({count} occurrences) — include more surrounding context"
 
-    Path(path).write_text(content.replace(old_str, new_str, 1), encoding="uft-8")
+    Path(path).write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
     return f"OK: edited {path}"
 
 
@@ -202,7 +202,7 @@ def list_dir(
             return
 
         for entry in entries:
-            if entry.name is DEFAULT_IGNORE:
+            if entry.name in DEFAULT_IGNORE:
                 continue
 
             rel = str(entry.relative_to(root))
@@ -213,7 +213,7 @@ def list_dir(
             marker = "/" if entry.is_dir() else ""
             lines.append(f"{prefix}{entry.name}{marker}")
             if entry.is_dir() and level < depth:
-                _walk(entry, prefix + " ", level=+1)
+                _walk(entry, prefix + " ", level=level + 1)
 
     _walk(root, "", 1)
     return "\n".join(lines) if lines else "(empty)"
