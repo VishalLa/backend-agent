@@ -48,6 +48,7 @@ class ContextWindowHandler:
         *,
         recent_turns: int = 4,
         summarizer: Optional[Any] = None,
+        tool_overhead_tokens: int = 0,
     ) -> None:
         if recent_turns < 1:
             raise ValueError("recent_turns must be at least 1")
@@ -55,6 +56,7 @@ class ContextWindowHandler:
         self.config = config
         self.recent_turns = recent_turns
         self._summarizer = summarizer
+        self.tool_overhead_tokens = max(0, tool_overhead_tokens)
 
 
     def _get_summarizer(self) -> Any:
@@ -71,11 +73,15 @@ class ContextWindowHandler:
         return self._summarizer
 
 
-    @staticmethod
-    def estimate_tokens(messages: Sequence[BaseMessage]) -> int:
-        """Conservative, provider-independent estimate used before an LLM call."""
+    def estimate_tokens(self, messages: Sequence[BaseMessage]) -> int:
+        """Conservative, provider-independent estimate used before an LLM call.
+
+        Includes tool_overhead_tokens - previously this only counted message
+        text, silently ignoring the token cost of any tools bound via
+        .bind_tools(), which are sent with every request regardless.
+        """
         text = "".join(_message_text(message) for message in messages)
-        return max(1, (len(text) + 3) // 4) + (4 * len(messages))
+        return max(1, (len(text) + 3) // 4) + (4 * len(messages)) + self.tool_overhead_tokens
 
 
     def prepare(

@@ -33,14 +33,17 @@ from ..task_profile import filter_tools_for_task
 from .helper import (
     MAX_EMPTY_RESPONSE_RETRIES,
     MAX_TOOL_HALLUCINATION_RETRIES,
+    ProjectRootViolation,
     _detect_read_only_stagnation,
     _extract_leaked_tool_call,
     _identify_provider,
     _last_ai_message_with_tool_calls,
     _prepare_messages_for_model,
+    _project_root,
     _thread_id,
     _truncate,
     classify_error,
+    resolve_tool_path_args,
 )
 
 _GENERIC_FALLBACK_SYSTEM_PROMPT = (
@@ -139,7 +142,13 @@ class BaseAgent(ABC):
         self.tools_by_name = {tool.name: tool for tool in self.tools}
 
         self.llm_with_tools = ChatModel(self.config).get_llm_with_tools(self.tools)
-        self.context_window = ContextWindowHandler(self.config)
+        
+        tool_overhead_tokens = sum(
+            len(getattr(t, "description", "") or "") for t in self.tools
+        ) // 4 + 50 * len(self.tools)
+        self.context_window = ContextWindowHandler(
+            self.config, tool_overhead_tokens=tool_overhead_tokens
+        )
 
         self.system_prompt = self._load_system_prompt()
         if "execute_in_sandbox" in self.tools_by_name:
@@ -245,6 +254,20 @@ class BaseAgent(ABC):
             messages = [SystemMessage(content=self.system_prompt), *messages]
 
         model_input = _prepare_messages_for_model(messages)
+
+        
+        project_root = _project_root()
+        if project_root:
+            model_input.append(
+                SystemMessage(
+                    content=(
+                        f"Project root for this task: {project_root}\n"
+                        "All relative file/cwd tool arguments are resolved against this "
+                        "root automatically - do not prefix paths with it yourself, and "
+                        "do not use paths outside it."
+                    )
+                )
+            )
 
         stagnation_nudge = _detect_read_only_stagnation(state.tool_logs)
         if stagnation_nudge:
@@ -591,6 +614,8 @@ class BaseAgent(ABC):
         tool_messages: list[ToolMessage] = []
         tool_logs: list[dict[str, Any]] = []
 
+        project_root = _project_root()
+
         for tc in valid_calls:
             call_id = tc["id"]
             name = tc["name"]
@@ -610,16 +635,31 @@ class BaseAgent(ABC):
                 )
             else:
                 try:
-                    raw_output = tool.invoke(args)
-                    output = (
-                        str(raw_output)
-                        if name == "read_file"
-                        else _truncate(raw_output, continuation_hint_tool=name)
-                    )
-                    success = True
-                except Exception as exc:  # noqa: BLE001 - tool errors are reported to the model, not raised
-                    output = f"ERROR: tool '{name}' raised an exception: {exc}"
+                    resolved_args = resolve_tool_path_args(name, args, project_root)
+                except ProjectRootViolation as exc:
+                    output = f"ERROR: {exc}"
                     success = False
+                    log_event(
+                        self.config.log_file,
+                        "tool_call_path_rejected",
+                        thread_id=thread_id,
+                        tool_name=name,
+                        call_id=call_id,
+                        project_root=project_root,
+                        error=str(exc),
+                    )
+                else:
+                    try:
+                        raw_output = tool.invoke(resolved_args)
+                        output = (
+                            str(raw_output)
+                            if name == "read_file"
+                            else _truncate(raw_output, continuation_hint_tool=name)
+                        )
+                        success = True
+                    except Exception as exc:  # noqa: BLE001 - tool errors are reported to the model, not raised
+                        output = f"ERROR: tool '{name}' raised an exception: {exc}"
+                        success = False
 
             log_event(
                 self.config.log_file,
@@ -628,6 +668,7 @@ class BaseAgent(ABC):
                 tool_name=name,
                 success=success,
                 args=safe_args(args),
+                project_root=project_root,
                 duration_ms=int((time.monotonic() - call_started_at) * 1000),
             )
 

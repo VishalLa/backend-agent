@@ -1,6 +1,7 @@
 import re
 import json
 import uuid
+from pathlib import Path
 from typing import Iterable, Optional, Any
 from config import Config
 
@@ -168,6 +169,102 @@ def _thread_id() -> str:
         return (cfg or {}).get("configurable", {}).get("thread_id", "unknown")
     except Exception:
         return "unknown"
+
+
+def _project_root() -> Optional[str]:
+    """Read the pinned project root for this run out of LangGraph's
+    `configurable` config, the same channel thread_id travels through -
+    NOT out of message text, which the model can (and did) stop honoring
+    once it's diluted far back in the conversation.
+
+    Returns None if no project root was configured for this invocation -
+    callers should treat that as "no enforcement, use paths as given"
+    rather than an error, so this stays backward compatible for anyone not
+    yet passing project_root through configurable.
+    """
+    try:
+        from langgraph.config import get_config as _lg_get_config
+    except ImportError:
+        return None
+
+    try:
+        cfg = _lg_get_config()
+        return (cfg or {}).get("configurable", {}).get("project_root")
+    except Exception:
+        return None
+
+
+class ProjectRootViolation(ValueError):
+    """Raised when a tool call's path argument resolves outside project_root."""
+
+
+PATH_ARG_NAMES_BY_TOOL: dict[str, tuple[str, ...]] = {
+    "read_file": ("path",),
+    "write_file": ("path",),
+    "append_file": ("path",),
+    "edit_file": ("path",),
+    "list_dir": ("path",),
+    "delete_path": ("path",),
+    "ripgrep_search": ("path",),
+    "run_shell_command": ("cwd",),
+    "git_status": ("cwd",),
+    "git_diff": ("cwd",),
+    "git_log": ("cwd",),
+    "git_branch": ("cwd",),
+    "git_checkout": ("cwd",),
+    "git_commit": ("cwd",),
+    "git_push": ("cwd",),
+    "launch_background_process": ("cwd",),
+}
+
+
+def resolve_tool_path_args(
+    tool_name: str,
+    args: dict,
+    project_root: Optional[str],
+) -> dict:
+    """Rewrite path-like tool args so they resolve against project_root
+    instead of whatever directory the agent process happens to be running
+    in, and reject any path (relative-with-'..' or absolute) that resolves
+    outside project_root.
+
+    If project_root is None, args pass through unchanged - this only
+    activates once a project root is actually configured for the run.
+
+    Raises ProjectRootViolation (caught by the caller, turned into a normal
+    tool ERROR string) rather than silently clamping the path, since
+    silently redirecting a path the model explicitly chose is more
+    confusing than telling it plainly that the path is out of bounds.
+    """
+    if not project_root:
+        return args
+
+    arg_names = PATH_ARG_NAMES_BY_TOOL.get(tool_name, ())
+    if not arg_names:
+        return args
+
+    root = Path(project_root).expanduser().resolve()
+    resolved = dict(args)
+
+    for arg_name in arg_names:
+        raw = resolved.get(arg_name)
+        if not raw or not isinstance(raw, str):
+            continue  # missing/blank/non-string - let the tool's own validation handle it
+
+        candidate_path = Path(raw)
+        candidate = (candidate_path if candidate_path.is_absolute() else root / candidate_path).resolve()
+
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ProjectRootViolation(
+                f"{tool_name}'s '{arg_name}' ({raw!r}) resolves to {candidate}, which is "
+                f"outside the project root ({root}). Use a path inside the project."
+            )
+
+        resolved[arg_name] = str(candidate)
+
+    return resolved
 
 
 def _find_json_object(text: str, start_at: int = 0) -> Optional[str]:
