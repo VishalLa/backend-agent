@@ -247,6 +247,7 @@ class Config(BaseModel):
 
             enable_ollama_fallback=enable_ollama,
             confirm_all_tools=confirm_all,
+            ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
 
             provider=resolved_provider,
             agent_type=os.environ.get("AGENT_TYPE", "backend"),

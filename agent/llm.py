@@ -1,15 +1,103 @@
-from typing import Any, Optional
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, List, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 
 from config import Config
+from log.log_event import log_event
+
+from .context_window import ContextWindowHandler
 
 
 OPENROUTER_HEADERS = {
     "HTTP-Referer": "https://github.com/local-coding-agent",
     "X-Title": "Local Coding Agent",
 }
+
+REMOTE_PROVIDER_CONTEXT_FLOOR = 32_000
+
+
+@dataclass
+class ProviderEntry:
+    name: str
+    model: Any
+    context_limit: int
+
+
+class AllProvidersFailedError(RuntimeError):
+    """Every configured provider failed. Carries the last exception seen so
+    classify_error() upstream still has something concrete to classify,
+    while individual per-provider failures are logged as they happen."""
+
+
+class FallbackChatModel:
+    """
+    Explicit provider iteration, replacing langchain's opaque
+    `.with_fallbacks()`.
+
+    Two things `.with_fallbacks()` cannot do, which this does:
+      1. Size the input differently per provider. A conversation that fits
+         comfortably in SambaNova's context has no reason to be sent
+         uncompressed to a local Ollama model capped at ollama_num_ctx -
+         that guarantees silent server-side truncation (typically eating
+         the system prompt, since it's first). Each provider gets the
+         conversation compressed to fit ITS OWN context_limit before the
+         call, not a one-size-fits-all payload sized for the biggest one.
+      2. Report which provider actually failed and why, for every attempt -
+         not just whichever happened to be last when everything failed.
+    """
+
+    def __init__(self, entries: List[ProviderEntry], config: Config):
+        self._entries = [e for e in entries if e.model is not None]
+        if not self._entries:
+            raise ValueError("no LLM providers are configured/available")
+        self._config = config
+
+    def invoke(self, messages, **kwargs) -> Any:
+        last_exc: Optional[Exception] = None
+
+        for entry in self._entries:
+            sized_messages = self._fit_to_limit(messages, entry.context_limit)
+            try:
+                response = entry.model.invoke(sized_messages, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - deliberately broad, this is the fallback boundary
+                last_exc = exc
+                log_event(
+                    self._config.log_file,
+                    "provider_attempt_failed",
+                    provider=entry.name,
+                    error=str(exc)[:500],
+                )
+                continue
+
+            if hasattr(response, "response_metadata"):
+                response.response_metadata = {
+                    **(response.response_metadata or {}),
+                    "provider": entry.name,
+                }
+            return response
+
+        raise AllProvidersFailedError(
+            f"all {len(self._entries)} configured provider(s) failed; "
+            f"last error ({self._entries[-1].name if self._entries else '?'}): {last_exc}"
+        ) from last_exc
+
+
+    def _fit_to_limit(self, messages, limit: int):
+        window = ContextWindowHandler(
+            self._config.model_copy(update={"max_context_tokens": limit})
+        )
+        if window.estimate_tokens(messages) <= limit:
+            return messages
+
+        result = window.prepare(messages, force_summarize=True)
+        return result.messages
+
+    def bind_tools(self, tools):  # noqa: D401 - intentionally a no-op passthrough
+        return self
 
 
 class ChatModel:
@@ -43,7 +131,7 @@ class ChatModel:
         api_key = self._get_secret(self.config.openrouter_api_key)
         if not api_key:
             return None
-            
+
         try:
             return ChatOpenAI(
                 model=self.config.openrouter_model,
@@ -64,7 +152,7 @@ class ChatModel:
         api_key = self._get_secret(self.config.groq_api_key)
         if not api_key:
             return None
-            
+
         try:
             return ChatOpenAI(
                 model=self.config.groq_model,
@@ -91,7 +179,7 @@ class ChatModel:
         )
         if self.config.ollama_num_thread is not None:
             kwargs["num_thread"] = self.config.ollama_num_thread
-            
+
         try:
             try:
                 return ChatOllama(**kwargs, timeout=self.config.ollama_request_timeout)
@@ -102,8 +190,16 @@ class ChatModel:
             return None
 
 
-    def _fallback_chain(self, tools: Optional[list]) -> Any:
-        """Build the runnable for this self.config, respecting self.config.provider."""
+    def _ollama_context_limit(self) -> int:
+        return max(1024, self.config.ollama_num_ctx - self.config.ollama_num_predict)
+
+
+    def _provider_entries(self, tools: Optional[list]) -> List[ProviderEntry]:
+        def bind(model):
+            if model is None:
+                return None
+            return model.bind_tools(tools) if tools else model
+
         if self.config.provider == "local":
             if not self.config.enable_ollama_fallback:
                 raise ValueError(
@@ -111,33 +207,48 @@ class ChatModel:
                     "(enable_ollama_fallback=False). Enable it, or switch back "
                     "to provider='api'."
                 )
-
-            ollama = self._build_ollama()
+            ollama = bind(self._build_ollama())
             if ollama is None:
                 raise ValueError(
                     "provider is 'local' but the Ollama client could not be built. "
                     "Check that Ollama is running and ollama_base_url is correct."
                 )
+            return [ProviderEntry("ollama", ollama, self._ollama_context_limit())]
 
-            return ollama.bind_tools(tools) if tools else ollama
+        entries = [
+            ProviderEntry(
+                "sambanova",
+                bind(self._build_sambanova()),
+                max(self.config.max_context_tokens, REMOTE_PROVIDER_CONTEXT_FLOOR),
+            ),
+            ProviderEntry(
+                "openrouter",
+                bind(self._build_openrouter()),
+                max(self.config.max_context_tokens, REMOTE_PROVIDER_CONTEXT_FLOOR),
+            ),
+            ProviderEntry(
+                "groq",
+                bind(self._build_groq()),
+                max(self.config.max_context_tokens, REMOTE_PROVIDER_CONTEXT_FLOOR),
+            ),
+        ]
+        if self.config.enable_ollama_fallback:
+            entries.append(
+                ProviderEntry("ollama", bind(self._build_ollama()), self._ollama_context_limit())
+            )
+        return entries
 
-        primary = self._build_sambanova()
-        openrouter = self._build_openrouter()
-        groq = self._build_groq()
-        ollama = self._build_ollama() if self.config.enable_ollama_fallback else None
 
-        if tools:
-            primary = primary.bind_tools(tools)
-            if openrouter is not None:
-                openrouter = openrouter.bind_tools(tools)
-            if groq is not None:
-                groq = groq.bind_tools(tools)
-            if ollama is not None:
-                ollama = ollama.bind_tools(tools)
+    def _fallback_chain(self, tools: Optional[list]) -> Any:
+        """Build the runnable for this self.config, respecting self.config.provider.
 
-        fallbacks = [m for m in (openrouter, groq, ollama) if m is not None]
-        
-        return primary.with_fallbacks(fallbacks, exceptions_to_handle=(Exception,)) if fallbacks else primary
+        Returns a FallbackChatModel (see above) rather than a langchain
+        RunnableWithFallbacks - same external .invoke() interface, but each
+        provider gets input sized to its own real context capacity instead
+        of one payload sized for the largest provider.
+        """
+        entries = self._provider_entries(tools)
+        return FallbackChatModel(entries, self.config)
 
 
     def _cache_key(self, extra: tuple = ()) -> tuple:
