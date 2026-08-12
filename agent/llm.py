@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+import httpx
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 
@@ -192,6 +193,57 @@ class ChatModel:
 
     def _ollama_context_limit(self) -> int:
         return max(1024, self.config.ollama_num_ctx - self.config.ollama_num_predict)
+
+
+    def ollama_healthcheck(self, timeout: float = 3.0) -> dict:
+        """Fast reachability + model-availability check for the configured
+        Ollama host.
+
+
+        Returns:
+            {
+                "reachable": bool,
+                "error": str | None,
+                "model_available": bool,
+                "wanted_model": str,
+                "available_models": list[str],
+            }
+        """
+        base_url = self.config.ollama_base_url.rstrip("/")
+        wanted = self.config.ollama_model
+
+        try:
+            resp = httpx.get(f"{base_url}/api/tags", timeout=timeout)
+            resp.raise_for_status()
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, this is a diagnostic, not a call path
+            return {
+                "reachable": False,
+                "error": (
+                    f"could not reach Ollama at {base_url}: {exc}. If this is a "
+                    "remote host, check it's powered on, on the same network, and "
+                    "started with OLLAMA_HOST=0.0.0.0:11434 (not just localhost)."
+                ),
+                "model_available": False,
+                "wanted_model": wanted,
+                "available_models": [],
+            }
+
+        try:
+            available = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+        except Exception:
+            available = []
+
+        model_available = wanted in available
+        return {
+            "reachable": True,
+            "error": None if model_available else (
+                f"Ollama at {base_url} is reachable, but '{wanted}' is not pulled there. "
+                f"Available: {available or '(none)'}. Run: ollama pull {wanted}"
+            ),
+            "model_available": model_available,
+            "wanted_model": wanted,
+            "available_models": available,
+        }
 
 
     def _provider_entries(self, tools: Optional[list]) -> List[ProviderEntry]:

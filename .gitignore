@@ -15,4 +15,5 @@ test.*
 test
 .vscode
 .agents
+.claude
 *.log
