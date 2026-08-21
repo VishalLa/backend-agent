@@ -92,7 +92,11 @@ def classify_error(error_text: str) -> dict:
     text = (error_text or "").lower()
 
     if any(marker in text for marker in CONTEXT_LENGTH_MARKERS):
-        return {"kind": "context_length", "retryable": False, "wait_seconds": None}
+        return {
+            "kind": "context_length", 
+            "retryable": False, 
+            "wait_seconds": None
+        }
 
     if any(marker in text for marker in TOKEN_RATE_LIMIT_MARKERS):
         wait = _parse_retry_after(text)
@@ -111,9 +115,17 @@ def classify_error(error_text: str) -> dict:
 
     if any(marker in text for marker in RETRYABLE_ERROR_MARKERS):
         wait = _parse_retry_after(text)
-        return {"kind": "transient", "retryable": True, "wait_seconds": wait}
+        return {
+            "kind": "transient", 
+            "retryable": True, 
+            "wait_seconds": wait
+        }
 
-    return {"kind": "unknown", "retryable": False, "wait_seconds": None}
+    return {
+        "kind": "unknown", 
+        "retryable": False, 
+        "wait_seconds": None
+    }
 
 
 def _identify_provider(response: Any, config: Config) -> str:

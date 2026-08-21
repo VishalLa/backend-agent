@@ -321,7 +321,12 @@ class BaseAgent(ABC):
                     )
                     continue
 
-                log_event(self.config.log_file, "llm_call", thread_id=thread_id, provider=_identify_provider(response, self.config))
+                log_event(
+                    self.config.log_file, 
+                    "llm_call", 
+                    thread_id=thread_id, 
+                    provider=_identify_provider(response, self.config)
+                )
                 log_event(
                     self.config.log_file,
                     "node_exited",

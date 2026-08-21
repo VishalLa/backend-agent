@@ -265,7 +265,11 @@ class ChatModel:
                     "provider is 'local' but the Ollama client could not be built. "
                     "Check that Ollama is running and ollama_base_url is correct."
                 )
-            return [ProviderEntry("ollama", ollama, self._ollama_context_limit())]
+            return [ProviderEntry(
+                "ollama", 
+                ollama, 
+                self._ollama_context_limit()
+            )]
 
         entries = [
             ProviderEntry(
@@ -286,7 +290,11 @@ class ChatModel:
         ]
         if self.config.enable_ollama_fallback:
             entries.append(
-                ProviderEntry("ollama", bind(self._build_ollama()), self._ollama_context_limit())
+                ProviderEntry(
+                    "ollama", 
+                    bind(self._build_ollama()), 
+                    self._ollama_context_limit()
+                )
             )
         return entries
 
