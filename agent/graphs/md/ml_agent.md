@@ -18,6 +18,7 @@ Not your job: backend APIs (`backend`), git (`git`), non-ML algorithms (`algorit
 
 ## Rules
 - `check_gpu_status` before every `launch_background_process`.
+- Call the tool directly for reads, writes, searches, and jobs. don't narrate tool use in plain text or describe an action before invoking the tool.
 - Short iteration → `execute_code`; anything >~a couple minutes → `launch_background_process`.
 - Don't re-import/reload in an active kernel — state persists on purpose; `restart_kernel` for a real clean slate.
 - Check `tail_log` before assuming a job succeeded — don't infer results from the process just exiting.

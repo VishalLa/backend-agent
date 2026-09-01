@@ -170,8 +170,9 @@ class ChatModel:
 
 
     def _build_ollama(self) -> Optional[ChatOllama]:
+        task_model = self.config.get_model_for_task(self.config.agent_type)
         kwargs: dict[str, Any] = dict(
-            model=self.config.ollama_model,
+            model=task_model,
             base_url=self.config.ollama_base_url,
             temperature=self.config.temperature,
             num_predict=self.config.ollama_num_predict,

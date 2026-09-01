@@ -25,5 +25,4 @@ dependencies = [
     "redis>=8.1.0",
     "requests>=2.34.2",
     "rich>=15.0.0",
-    "streamlit>=1.61.1",
 ]

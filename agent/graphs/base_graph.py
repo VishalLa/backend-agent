@@ -48,7 +48,9 @@ from .helper import (
 
 _GENERIC_FALLBACK_SYSTEM_PROMPT = (
     "You are a coding agent. Inspect before editing, use only the provided "
-    "tools, and verify changes before claiming they succeeded."
+    "tools, and verify changes before claiming they succeeded. "
+    "Call the tool directly when you need to read, write, search, or execute; "
+    "don't narrate tool use in plain text before invoking it."
 )
 
 

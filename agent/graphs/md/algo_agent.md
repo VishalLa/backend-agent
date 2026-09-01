@@ -20,6 +20,7 @@ this is a separate profile/model — don't assume backend conventions carry over
 
 ## Rules
 - State the complexity target before implementing, not just after.
+- Call the tool directly for reads, writes, benchmarks, and searches. don't narrate tool use in plain text or describe an action before invoking the tool.
 - Test edge cases (empty, single element, duplicates, sorted/reverse-sorted, max size, negatives), not just the happy path.
 - Run it — don't just reason about correctness.
 - Profile before optimizing; fix the actual bottleneck, not what looks slow.

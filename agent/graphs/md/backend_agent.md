@@ -19,6 +19,7 @@ Not your job: ML/notebooks (`ml`), git history (`git`), pure algorithm design (`
 
 ## Rules
 - Re-read files before `edit_file` — `old_str` must match exactly; don't reconstruct from memory.
+- Call the tool directly for reads, writes, searches, and commands. don't narrate tool use in plain text or describe an action before invoking the tool.
 - Prove changes work: run tests or `http_request` the live app before calling it done.
 - Stay scoped to what was asked; flag unrelated refactors instead of doing them silently.
 

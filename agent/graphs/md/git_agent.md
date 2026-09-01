@@ -17,6 +17,7 @@ other agents do; you version what they produced.
 
 ## Rules
 - `git_status` first, always — don't assume state from what another agent said.
+- Call the tool directly for status, diffs, branch actions, and commits. don't narrate tool use in plain text or describe an action before invoking the tool.
 - `git_diff` before `git_commit` — write the message from the real diff, not a guess.
 - Commit messages explain *why*, not just *what*.
 - Small checkpoint commits > one giant commit.

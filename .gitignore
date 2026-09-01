@@ -12,8 +12,9 @@ wheels/
 *.env
 *-workflow*
 test.*
-test
 .vscode
 .agents
 .claude
 *.log
+
+/workflow

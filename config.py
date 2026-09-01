@@ -15,7 +15,8 @@ DEFAULT_SAMBANOVA_MODAL = "gpt-oss-120b"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 # local
-DEFAULT_OLLAMA_MODEL = "gpt-oss:20b"
+DEFAULT_OLLAMA_MODEL = "MFDoom/deepseek-coder-v2-tool-calling:16b"
+DEFAULT_OLLAMA_KQUANT_MODEL = "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
 SUMMARY_MODAL = "phi4-mini-reasoning"
 
 VALID_AGENT_TYPES = ("backend", "ml", "git", "algorithms")
@@ -40,10 +41,13 @@ class Config(BaseModel):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     ollama_summary_model: str = SUMMARY_MODAL
+    ollama_use_kquant: bool = False
 
     ollama_num_ctx: int = 8192
     ollama_num_predict: int = 4096
     ollama_keep_alive: str = "10m"
+    ollama_flash_attention: bool = False
+    ollama_kv_cache_type: str = "q8_0"
     ollama_num_thread: Optional[int] = None
     ollama_request_timeout: float = 300.0
 
@@ -61,13 +65,14 @@ class Config(BaseModel):
     retry_backoff_seconds: float = 2.0
 
     agent_type: str = "backend"
-    provider: str = "api"
+    provider: str = "local"
 
-    # per-task-type model overrides 
-    backend_model_name: str = DEFAULT_SAMBANOVA_MODAL
-    ml_model_name: str = DEFAULT_SAMBANOVA_MODAL
-    git_model_name: str = DEFAULT_GROQ_MODEL
-    algo_model_name: str = DEFAULT_SAMBANOVA_MODAL
+    # i am using local llm for my convension you can update the default model to api provider
+    # per-task-type model overrides
+    backend_model_name: str = DEFAULT_OLLAMA_MODEL
+    ml_model_name: str = DEFAULT_OLLAMA_MODEL
+    git_model_name: str = DEFAULT_OLLAMA_MODEL
+    algo_model_name: str = DEFAULT_OLLAMA_MODEL
 
     postgres_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"
     postgres_pool_size: int = 5
@@ -198,10 +203,10 @@ class Config(BaseModel):
         profile = TASK_PROFILES.get(task_mode)
 
         if profile is None:
-            return self.sambanova_model
+            return self.ollama_model
 
         field_name = profile.get("model_field")
-        return getattr(self, field_name, self.sambanova_model)
+        return getattr(self, field_name, self.ollama_model)
 
 
     def context_over_budget(self, current_tokens: int) -> bool:
@@ -210,7 +215,7 @@ class Config(BaseModel):
 
     @classmethod
     def from_env(cls, provider: Optional[str] = None) -> "Config":
-        resolved_provider = (provider or os.environ.get("AGENT_PROVIDER", "api")).strip().lower()
+        resolved_provider = (provider or os.environ.get("AGENT_PROVIDER", "local")).strip().lower()
 
         sambanova_key = os.environ.get("SAMBANOVA_API_KEY", "")
         groq_key = os.environ.get("GROQ_API_KEY", "")
@@ -235,6 +240,33 @@ class Config(BaseModel):
             "AGENT_CONFIRM_ALL_TOOLS", "false"
         ).strip().lower() in ("1", "true", "yes", "on")
 
+        ollama_use_kquant = os.environ.get(
+            "OLLAMA_USE_KQUANT", "false"
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        ollama_flash_attention = os.environ.get(
+            "OLLAMA_FLASH_ATTENTION", "false"
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        ollama_num_thread_value = os.environ.get("OLLAMA_NUM_THREADS")
+        ollama_num_thread = int(ollama_num_thread_value) if ollama_num_thread_value and ollama_num_thread_value.strip() else None
+
+        default_task_model = DEFAULT_OLLAMA_MODEL if resolved_provider == "local" else DEFAULT_SAMBANOVA_MODAL
+        kquant_task_model = DEFAULT_OLLAMA_KQUANT_MODEL if resolved_provider == "local" else DEFAULT_SAMBANOVA_MODAL
+
+        if resolved_provider == "local":
+            # Use K-quant if enabled, else tool-calling model
+            base_model = kquant_task_model if ollama_use_kquant else DEFAULT_OLLAMA_MODEL
+            backend_model_name = base_model
+            ml_model_name = base_model
+            git_model_name = base_model
+            algo_model_name = base_model
+        else:
+            backend_model_name = os.environ.get("BACKEND_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL)
+            ml_model_name = os.environ.get("ML_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL)
+            git_model_name = os.environ.get("GIT_MODEL_NAME", DEFAULT_GROQ_MODEL)
+            algo_model_name = os.environ.get("ALGO_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL)
+
         return cls(
             sambanova_api_key=SecretStr(sambanova_key) if sambanova_key else None,
             sambanova_base_url=os.environ.get("SAMBANOVA_BASE_URL", "https://api.sambanova.ai/v1"),
@@ -247,15 +279,20 @@ class Config(BaseModel):
 
             enable_ollama_fallback=enable_ollama,
             confirm_all_tools=confirm_all,
+            ollama_use_kquant=ollama_use_kquant,
             ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+            ollama_keep_alive=os.environ.get("OLLAMA_KEEP_ALIVE", "10m"),
+            ollama_flash_attention=ollama_flash_attention,
+            ollama_kv_cache_type=os.environ.get("OLLAMA_KV_CACHE_TYPE", "q8_0"),
+            ollama_num_thread=ollama_num_thread,
 
             provider=resolved_provider,
             agent_type=os.environ.get("AGENT_TYPE", "backend"),
 
-            backend_model_name=os.environ.get("BACKEND_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
-            ml_model_name=os.environ.get("ML_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
-            git_model_name=os.environ.get("GIT_MODEL_NAME", DEFAULT_GROQ_MODEL),
-            algo_model_name=os.environ.get("ALGO_MODEL_NAME", DEFAULT_SAMBANOVA_MODAL),
+            backend_model_name=backend_model_name,
+            ml_model_name=ml_model_name,
+            git_model_name=git_model_name,
+            algo_model_name=algo_model_name,
 
             postgres_url=os.environ.get("POSTGRES_URL", "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"),
             postgres_pool_size=int(os.environ.get("POSTGRES_POOL_SIZE", "5")),

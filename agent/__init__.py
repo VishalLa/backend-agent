@@ -4,11 +4,12 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 
 from config import Config
 
+from .eval import EvalCase, EvalHarness, EvalResult
 from .graphs.algo_graph import AlgoAgent
 from .graphs.backend_graph import BackendAgent
 from .graphs.base_graph import BaseAgent
@@ -54,6 +55,70 @@ _AGENT_CLASSES: dict[str, type[BaseAgent]] = {
 }
 
 
+class TaskRouter:
+    """Choose the correct specialist agent for a user request."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self._llm = None
+        
+
+    def _classify_with_model(self, user_message: str) -> str:
+        try:
+            from agent.llm import ChatModel
+
+            self._llm = self._llm or ChatModel(self.config).get_llm()
+            prompt = (
+                "You are a routing classifier. Return exactly one of: backend, ml, git, algorithms.\n"
+                f"User request: {user_message.strip()}"
+            )
+            response = self._llm.invoke([
+                SystemMessage(content="Return only the agent key and nothing else."),
+                HumanMessage(content=prompt),
+            ])
+            
+            content = getattr(response, "content", str(response))
+            if isinstance(content, list):
+                content = " ".join(str(part.get("text", part)) for part in content if isinstance(part, dict))
+                
+            text = str(content).strip().lower()
+            if text in {"backend", "ml", "git", "algorithms"}:
+                return text
+            
+        except Exception:
+            pass
+        return self._keyword_fallback(user_message)
+
+
+    @staticmethod
+    def _keyword_fallback(user_message: str) -> str:
+        text = (user_message or "").lower()
+
+        git_markers = (
+            "git", "branch", "commit", "merge", "pull request", "checkout",
+            "push", "status", "diff", "repo", "repository", "tag"
+        )
+        ml_markers = (
+            "train", "model", "dataset", "accuracy", "evaluate", "mlflow",
+            "tensor", "pytorch", "tensorflow", "embedding", "vector", "notebook"
+        )
+        algorithm_markers = (
+            "algorithm", "complexity", "sort", "search", "graph", "heap",
+            "dynamic programming", "dp", "leetcode", "optimi", "binary search"
+        )
+
+        if any(marker in text for marker in git_markers):
+            return "git"
+        if any(marker in text for marker in ml_markers):
+            return "ml"
+        if any(marker in text for marker in algorithm_markers):
+            return "algorithms"
+        return "backend"
+
+    def route(self, user_message: str) -> str:
+        return self._classify_with_model(user_message)
+
+
 class AgentRunner:
     """Runs exactly the agent selected by the caller; it never auto-routes.
 
@@ -74,6 +139,7 @@ class AgentRunner:
         self.config = config
         self._agent_classes = dict(agent_classes or _AGENT_CLASSES)
         self._tools_by_task = dict(tools_by_task or TOOLS_BY_TASK)
+        self.dispatcher = TaskRouter(config)
         self.enable_sandbox = enable_sandbox
         self.storage = storage
         if enable_sandbox:
@@ -109,9 +175,14 @@ class AgentRunner:
         return self._agents[key]
 
 
+    def route_task(self, user_message: str) -> str:
+        if not user_message or not user_message.strip():
+            raise ValueError("user_message must not be empty")
+        return self.dispatcher.route(user_message)
+
     def run(
         self,
-        agent_key: str,
+        agent_key: Optional[str],
         user_message: str,
         *,
         thread_id: Optional[str] = None,
@@ -122,10 +193,14 @@ class AgentRunner:
         if not user_message or not user_message.strip():
             raise ValueError("user_message must not be empty")
 
-        key = _validate_agent_key(
-            agent_key=agent_key,
-            agent_classes=self._agent_classes,
-            tools_by_task=self._tools_by_task
+        key = (
+            self.route_task(user_message)
+            if agent_key is None or agent_key.strip() == ""
+            else _validate_agent_key(
+                agent_key=agent_key,
+                agent_classes=self._agent_classes,
+                tools_by_task=self._tools_by_task,
+            )
         )
 
         conversation_id = thread_id or uuid.uuid4().hex

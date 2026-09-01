@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional
+import json
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.syntax import Syntax
+from rich.text import Text
 
 from schema.agent_schema import ConfirmationDecision, ConfirmationRequest
+
+console = Console()
 
 ALWAYS_CONFIRM_TOOLS = {
     "run_shell_command",
@@ -55,46 +64,72 @@ def confirmation_resume_payload(
     return ConfirmationDecision(approved=approved, reason=reason).model_dump(mode="json")
 
 
-def render_streamlit_confirmation(
-    request: ConfirmationRequest,
-    *,
-    key: Optional[str] = None,
-) -> Optional[ConfirmationDecision]:
-    """Render an approval control for a future Streamlit dashboard.
+# def render_streamlit_confirmation(
+#     request: ConfirmationRequest,
+#     *,
+#     key: Optional[str] = None,
+# ) -> Optional[ConfirmationDecision]:
+#     """Render an approval control for a future Streamlit dashboard.
 
-    Returns ``None`` until the user chooses an action. The dashboard resumes
-    the graph with ``Command(resume=confirmation_resume_payload(...))``.
-    Streamlit is imported lazily so agent and worker processes do not need the
-    dashboard dependency installed.
-    """
-    try:
-        import streamlit as st
-    except ImportError as exc:
-        raise RuntimeError("Streamlit is required to render the dashboard confirmation control") from exc
+#     Returns ``None`` until the user chooses an action. The dashboard resumes
+#     the graph with ``Command(resume=confirmation_resume_payload(...))``.
+#     Streamlit is imported lazily so agent and worker processes do not need the
+#     dashboard dependency installed.
+#     """
+#     try:
+#         import streamlit as st
+#     except ImportError as exc:
+#         raise RuntimeError("Streamlit is required to render the dashboard confirmation control") from exc
 
-    widget_key = key or f"confirmation-{request.call_id}"
-    st.warning(f"Confirmation required: `{request.tool_name}`")
-    st.caption(request.reason)
-    st.json(confirmation_request_payload(request))
-    reason = st.text_input("Reason (optional)", key=f"{widget_key}-reason")
-    approve_column, deny_column = st.columns(2)
-    if approve_column.button("Approve", key=f"{widget_key}-approve", type="primary"):
-        return ConfirmationDecision(approved=True, reason=reason or None)
-    if deny_column.button("Deny", key=f"{widget_key}-deny"):
-        return ConfirmationDecision(approved=False, reason=reason or None)
-    return None
+#     widget_key = key or f"confirmation-{request.call_id}"
+#     st.warning(f"Confirmation required: `{request.tool_name}`")
+#     st.caption(request.reason)
+#     st.json(confirmation_request_payload(request))
+#     reason = st.text_input("Reason (optional)", key=f"{widget_key}-reason")
+#     approve_column, deny_column = st.columns(2)
+#     if approve_column.button("Approve", key=f"{widget_key}-approve", type="primary"):
+#         return ConfirmationDecision(approved=True, reason=reason or None)
+#     if deny_column.button("Deny", key=f"{widget_key}-deny"):
+#         return ConfirmationDecision(approved=False, reason=reason or None)
+#     return None
 
 
 def default_cli_confirmation_handler(
     request: ConfirmationRequest
 ) -> ConfirmationDecision:
-    print("\n--- CONFIRMATION REQUIRED ---")
-    print(f"Tool:   {request.tool_name}")
-    print(f"Args:   {request.tool_args}")
-    print(f"Reason: {request.reason}")
+    # Build content panel with tool details
+    content = Text()
+    content.append("Tool: ", style="bold")
+    content.append(f"{request.tool_name}\n", style="cyan")
+    content.append("\nReason: ", style="bold")
+    content.append(f"{request.reason}\n\n", style="yellow")
+    content.append("Arguments:\n", style="bold")
+    
+    # Display tool info panel
+    console.print(
+        Panel(
+            content,
+            title="[bold yellow]⚠️  CONFIRMATION REQUIRED[/bold yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+    
+    # Format and display arguments as JSON
+    try:
+        args_json = json.dumps(request.tool_args, indent=2)
+        syntax = Syntax(args_json, "json", theme="monokai", line_numbers=False)
+        console.print(syntax)
+    except Exception:
+        # Fallback if JSON formatting fails
+        console.print(f"[yellow]{request.tool_args}[/yellow]")
 
-    try: 
-        answer = input("Allow this? [y/N]: ").strip().lower()
+    try:
+        answer = Prompt.ask(
+            "[bold red]Allow this?[/bold red]",
+            choices=["y", "n"],
+            default="n",
+        ).strip().lower()
     except EOFError:
         return ConfirmationDecision(
             approved=False,
@@ -106,7 +141,9 @@ def default_cli_confirmation_handler(
             reason="cancelled by user (Ctrl-C)"
         )
     if answer in ("y", "yes"):
+        console.print("[green]✓ Approved[/green]")
         return ConfirmationDecision(approved=True)
+    console.print("[red]✗ Denied[/red]")
     return ConfirmationDecision(
         approved=False, 
         reason="declined by user"

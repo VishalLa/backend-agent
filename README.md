@@ -155,3 +155,57 @@ result = runner.resume_confirmation(
 Useful optional settings include `AGENT_TYPE`, `AGENT_CONFIRM_ALL_TOOLS`, `AGENT_ENABLE_OLLAMA_FALLBACK`, provider base URLs, and the per-task `BACKEND_MODEL_NAME`, `ML_MODEL_NAME`, `GIT_MODEL_NAME`, and `ALGO_MODEL_NAME` values. Set `provider` to `local` when constructing `Config` to use Ollama only; otherwise API mode uses the configured fallback chain.
 
 For database storage, set `POSTGRES_URL` (plus optional `POSTGRES_POOL_SIZE` and `POSTGRES_ECHO`). The sandbox also requires a running Docker daemon; the agent builds the image from `sandbox/Dockerfile` on first use.
+
+## Implementation Status
+
+All core features and optimizations are now implemented:
+
+### Core Functionality
+- ✅ **CLI Entry Point** — Interactive agent runner with rich terminal UI
+- ✅ **Agent Router/Dispatcher** — Automatic task classification (backend/ml/git/algorithms)
+- ✅ **Safety Tests** — Comprehensive validation of tool filtering and confirmation gates
+- ✅ **Git Worktree Isolation** — Scratch-branch environment with diff review before merge
+- ✅ **Eval Harness** — Lightweight benchmark for model/config validation
+- ✅ **Context Window Management** — Rolling summaries with local model compression
+
+### Local Ollama Optimization
+- ✅ **Ollama Tuning (Phase 5)** — Environment-driven configuration for keep_alive, flash_attention, KV cache, thread count
+- ✅ **Tool-Calling Model Default (Phase 6)** — MFDoom/deepseek-coder-v2-tool-calling:16b enforced in local mode
+- ✅ **Prompt Tightening (Phase 7)** — Direct tool-call instructions in agent prompts (no narration)
+- ✅ **K-Quant Upgrade (Phase 8)** — Support for deepseek-coder-v2:16b-lite-instruct-q4_K_M with benchmarking
+
+### Testing & Validation
+- ✅ **Router Tests** — 7 tests validating model defaults and task routing
+- ✅ **K-Quant Tests** — 8 tests for quantization mode switching
+- ✅ **Safety Test Suite** — 19+ tests for tool filtering, path containment, confirmation gates
+- ✅ **Worktree Tests** — Isolation, diff summaries, merge/discard workflows
+
+### Run & Benchmark Scripts
+- ✅ `run.sh` — Multi-mode launcher (CLI, full stack, dev, sandbox, celery)
+- ✅ `run_ollama.sh` — Ollama readiness check and model configuration display
+- ✅ `phase8_validate.sh` — A/B benchmarking script for K-quant vs. tool-calling
+
+### Quick Start
+```bash
+# Install and check Ollama
+bash run_ollama.sh
+
+# Run CLI with automatic agent selection
+python3 main.py
+
+# Run with specific agent (backend, ml, git, or algorithms)
+python3 main.py --agent backend
+
+# Enable K-quant quantization
+OLLAMA_USE_KQUANT=true python3 main.py
+
+# Run full stack with sandbox and persistence
+bash run.sh full
+```
+
+### Local-First Architecture
+- All models run locally on Ollama (no cloud API calls by default)
+- Fallback chain still supports SambaNova → OpenRouter → Groq → Ollama if configured with API keys
+- Tool-calling model with explicit direct-invocation prompts for structured JSON output
+- K-quant quantization option for improved accuracy with zero latency overhead
+- Optional PostgreSQL persistence and Docker sandbox for isolated execution
