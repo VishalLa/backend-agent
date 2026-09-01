@@ -211,7 +211,7 @@ class ChatModel:
             }
         """
         base_url = self.config.ollama_base_url.rstrip("/")
-        wanted = self.config.ollama_model
+        wanted = self.config.get_model_for_task(self.config.agent_type)
 
         try:
             resp = httpx.get(f"{base_url}/api/tags", timeout=timeout)

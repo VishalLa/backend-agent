@@ -13,10 +13,20 @@ export OLLAMA_NUM_THREADS="${OLLAMA_NUM_THREADS:-}"
 export AGENT_PROVIDER="${AGENT_PROVIDER:-local}"
 export AGENT_ENABLE_OLLAMA_FALLBACK="${AGENT_ENABLE_OLLAMA_FALLBACK:-true}"
 export OLLAMA_USE_KQUANT="${OLLAMA_USE_KQUANT:-false}"
+export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
 
 if ! command -v ollama >/dev/null 2>&1; then
     echo "ERROR: ollama is not installed or not on PATH." >&2
     exit 1
+fi
+
+if [ "${1:-}" = "--serve" ]; then
+    echo "Starting Ollama with the configured server tuning values..."
+    exec env \
+        OLLAMA_HOST="$OLLAMA_HOST" \
+        OLLAMA_FLASH_ATTENTION="$OLLAMA_FLASH_ATTENTION" \
+        OLLAMA_KV_CACHE_TYPE="$OLLAMA_KV_CACHE_TYPE" \
+        ollama serve
 fi
 
 if ! curl -fsS "${OLLAMA_BASE_URL}/api/tags" >/dev/null 2>&1; then
@@ -32,6 +42,7 @@ echo "  flash_attention: ${OLLAMA_FLASH_ATTENTION}"
 echo "  kv_cache_type: ${OLLAMA_KV_CACHE_TYPE}"
 echo "  num_threads: ${OLLAMA_NUM_THREADS:-auto}"
 echo "  use_kquant: ${OLLAMA_USE_KQUANT}"
+echo "  server_host: ${OLLAMA_HOST}"
 
 echo
 
@@ -61,3 +72,4 @@ else
 fi
 
 echo "Use the app normally via: python3 main.py"
+echo "To start Ollama with flash-attention and KV-cache settings: bash run_ollama.sh --serve"

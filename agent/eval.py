@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
+from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import Config
+from .llm import ChatModel
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,7 @@ class EvalHarness:
         *,
         name: str = "unnamed",
         agent_key: str = "backend",
+        max_latency_seconds: float = 5.0,
     ) -> EvalResult:
         text = (content or "").lower()
         keywords = tuple(str(keyword).strip().lower() for keyword in expected_keywords if str(keyword).strip())
@@ -103,7 +109,7 @@ class EvalHarness:
         missing = tuple(keyword for keyword in keywords if keyword not in text)
         coverage = len(hits) / len(keywords)
 
-        max_latency = 5.0
+        max_latency = max_latency_seconds
         latency_score = 1.0 if latency_seconds <= max_latency else max(0.0, 1.0 - (latency_seconds - max_latency) / max_latency)
         score = max(0.0, min(1.0, coverage * 0.8 + latency_score * 0.2))
         passed = coverage == 1.0 and latency_seconds <= max_latency
@@ -124,11 +130,99 @@ class EvalHarness:
         )
 
 
-    def run_case(self, case: EvalCase, response_text: str, latency_seconds: float) -> EvalResult:
+    def run_case(
+        self,
+        case: EvalCase,
+        response_text: str,
+        latency_seconds: float
+    ) -> EvalResult:
         return self.score_response(
             response_text,
             case.expected_keywords,
             latency_seconds,
             name=case.name,
             agent_key=case.agent_key,
+            max_latency_seconds=case.max_latency_seconds,
         )
+
+
+    def run(
+        self,
+        cases: list[EvalCase] | None = None
+    ) -> dict[str, Any]:
+        """Run the suite against the configured local model.
+
+        Cases intentionally use an unbound model: benchmark prompts must not
+        modify the project or pause at a confirmation gate. Each case still
+        selects its specialist task model, which is what Phase 8 compares.
+        """
+        suite = cases or self.build_default_suite()
+        results: list[EvalResult] = []
+
+        for case in suite:
+            case_config = self.config.model_copy(update={"agent_type": case.agent_key})
+            model = ChatModel(case_config).get_llm()
+            started = time.monotonic()
+            
+            try:
+                response = model.invoke([
+                    SystemMessage(
+                        content=(
+                            "You are being evaluated as a coding specialist. "
+                            "Answer the request directly in plain text. Do not call tools."
+                        )
+                    ),
+                    HumanMessage(content=case.prompt),
+                ])
+                
+                content = getattr(response, "content", str(response))
+                if isinstance(content, list):
+                    content = " ".join(
+                        str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                        for part in content
+                    )
+                
+                elapsed = time.monotonic() - started
+                results.append(self.score_response(
+                    str(content), case.expected_keywords, elapsed,
+                    name=case.name, agent_key=case.agent_key,
+                    max_latency_seconds=case.max_latency_seconds,
+                ))
+                
+            except Exception as exc:  # retain a result for an unavailable model
+                elapsed = time.monotonic() - started
+                results.append(EvalResult(
+                    name=case.name,
+                    agent_key=case.agent_key,
+                    passed=False,
+                    score=0.0,
+                    latency_seconds=elapsed,
+                    keyword_hits=(),
+                    missing_keywords=case.expected_keywords,
+                    details=f"Model invocation failed: {exc}",
+                ))
+
+        return {
+            "passed": sum(result.passed for result in results),
+            "failed": sum(not result.passed for result in results),
+            "invocation_failures": sum(
+                result.details.startswith("Model invocation failed:") for result in results
+            ),
+            "avg_latency": (
+                sum(result.latency_seconds for result in results) / len(results)
+                if results else 0.0
+            ),
+            "results": [
+                {
+                    "name": result.name,
+                    "agent_key": result.agent_key,
+                    "passed": result.passed,
+                    "score": result.score,
+                    "latency_seconds": result.latency_seconds,
+                    "keyword_hits": list(result.keyword_hits),
+                    "missing_keywords": list(result.missing_keywords),
+                    "details": result.details,
+                }
+                for result in results
+            ],
+        }

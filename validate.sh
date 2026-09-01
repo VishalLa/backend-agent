@@ -69,41 +69,23 @@ if [ "$RUN_PHASE7" = "true" ]; then
     echo "  Model: MFDoom/deepseek-coder-v2-tool-calling:16b"
     echo
 
-    PYTHONPATH="$PROJECT_DIR" python3 - <<'PY' > "$PHASE7_RESULT" 2>&1 || true
+    OLLAMA_USE_KQUANT=false PYTHONPATH="$PROJECT_DIR" python3 - <<'PY' > "$PHASE7_RESULT" 2> "${PHASE7_RESULT}.err"
 import sys
 import json
 from pathlib import Path
 
-# Ensure config uses tool-calling model (not K-quant)
-import os
-os.environ["OLLAMA_USE_KQUANT"] = "false"
+from config import Config
+from agent.eval import EvalHarness
 
-try:
-    from config import Config
-    from agent.eval import EvalHarness
-    
-    cfg = Config.from_env()
-    print(f"[Phase 7] Model: {cfg.backend_model_name}", file=sys.stderr)
-    print(f"[Phase 7] Running eval harness...", file=sys.stderr)
-    
-    harness = EvalHarness(cfg)
-    results = harness.run()
-    
-    # Output JSON results
-    json_results = {
-        "phase": "phase7_toolcalling",
-        "model": cfg.backend_model_name,
-        "passed": results.get("passed", 0),
-        "failed": results.get("failed", 0),
-        "avg_latency_seconds": results.get("avg_latency", 0),
-        "results": results
-    }
-    print(json.dumps(json_results))
-except Exception as e:
-    print(f"ERROR in Phase 7 eval: {e}", file=sys.stderr)
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+cfg = Config.from_env()
+print(f"[Phase 7] Model: {cfg.backend_model_name}", file=sys.stderr)
+results = EvalHarness(cfg).run()
+print(json.dumps({
+    "phase": "phase7_toolcalling", "model": cfg.backend_model_name,
+    "passed": results["passed"], "failed": results["failed"],
+    "invocation_failures": results["invocation_failures"],
+    "avg_latency_seconds": results["avg_latency"], "results": results,
+}))
 PY
 
     if [ $? -eq 0 ] && [ -s "$PHASE7_RESULT" ]; then
@@ -126,41 +108,23 @@ if [ "$RUN_KQUANT" = "true" ]; then
     ollama pull deepseek-coder-v2:16b-lite-instruct-q4_K_M || echo "Note: K-quant pull may have failed; check Ollama logs."
     echo
 
-    PYTHONPATH="$PROJECT_DIR" python3 - <<'PY' > "$KQUANT_RESULT" 2>&1 || true
+    OLLAMA_USE_KQUANT=true PYTHONPATH="$PROJECT_DIR" python3 - <<'PY' > "$KQUANT_RESULT" 2> "${KQUANT_RESULT}.err"
 import sys
 import json
 from pathlib import Path
 
-# Enable K-quant for this run
-import os
-os.environ["OLLAMA_USE_KQUANT"] = "true"
+from config import Config
+from agent.eval import EvalHarness
 
-try:
-    from config import Config
-    from agent.eval import EvalHarness
-    
-    cfg = Config.from_env()
-    print(f"[Phase 8] Model: {cfg.backend_model_name}", file=sys.stderr)
-    print(f"[Phase 8] Running eval harness...", file=sys.stderr)
-    
-    harness = EvalHarness(cfg)
-    results = harness.run()
-    
-    # Output JSON results
-    json_results = {
-        "phase": "phase8_kquant",
-        "model": cfg.backend_model_name,
-        "passed": results.get("passed", 0),
-        "failed": results.get("failed", 0),
-        "avg_latency_seconds": results.get("avg_latency", 0),
-        "results": results
-    }
-    print(json.dumps(json_results))
-except Exception as e:
-    print(f"ERROR in Phase 8 eval: {e}", file=sys.stderr)
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+cfg = Config.from_env()
+print(f"[Phase 8] Model: {cfg.backend_model_name}", file=sys.stderr)
+results = EvalHarness(cfg).run()
+print(json.dumps({
+    "phase": "phase8_kquant", "model": cfg.backend_model_name,
+    "passed": results["passed"], "failed": results["failed"],
+    "invocation_failures": results["invocation_failures"],
+    "avg_latency_seconds": results["avg_latency"], "results": results,
+}))
 PY
 
     if [ $? -eq 0 ] && [ -s "$KQUANT_RESULT" ]; then
@@ -175,7 +139,7 @@ fi
 # Generate comparison report
 echo "Generating comparison report..."
 if [ -f "$PHASE7_RESULT" ] && [ -f "$KQUANT_RESULT" ]; then
-    python3 - <<'PY' > "$COMPARISON_RESULT" 2>&1 || true
+    python3 - <<'PY' > "$COMPARISON_RESULT"
 import json
 import sys
 
@@ -189,8 +153,11 @@ try:
     p8_model = phase8.get("model", "unknown")
     p7_passed = phase7.get("passed", 0)
     p8_passed = phase8.get("passed", 0)
+    p7_invocation_failures = phase7.get("invocation_failures", 0)
+    p8_invocation_failures = phase8.get("invocation_failures", 0)
     p7_latency = phase7.get("avg_latency_seconds", 0)
     p8_latency = phase8.get("avg_latency_seconds", 0)
+    latency_percent = ((p8_latency / p7_latency - 1) * 100) if p7_latency else None
 
     report = f"""
 Phase 8 K-quant Upgrade Validation Report
@@ -199,21 +166,25 @@ Phase 8 K-quant Upgrade Validation Report
 Phase 7 (Tool-calling model):
   Model: {p7_model}
   Tests Passed: {p7_passed}
+  Invocation Failures: {p7_invocation_failures}
   Avg Latency: {p7_latency:.2f}s
 
 Phase 8 (K-quant model):
   Model: {p8_model}
   Tests Passed: {p8_passed}
+  Invocation Failures: {p8_invocation_failures}
   Avg Latency: {p8_latency:.2f}s
 
 Comparison:
   Accuracy Gain: {p8_passed - p7_passed:+d} tests
-  Latency Change: {p8_latency - p7_latency:+.2f}s ({((p8_latency/p7_latency - 1)*100):+.1f}% change)
+  Latency Change: {p8_latency - p7_latency:+.2f}s ({f'{latency_percent:+.1f}%' if latency_percent is not None else 'n/a'})
 
 Recommendation:
 """
 
-    if p8_passed > p7_passed and p8_latency <= p7_latency * 1.1:
+    if p7_invocation_failures or p8_invocation_failures:
+        report += "  ! Benchmark is invalid: one or both models could not complete all invocations. Check the .err files and Ollama model availability."
+    elif p8_passed > p7_passed and p8_latency <= p7_latency * 1.1:
         report += f"  ✓ K-quant model is better: +{p8_passed - p7_passed} accuracy with {max(0, p7_latency - p8_latency):.2f}s speedup or minimal overhead."
         report += "\n  Action: Set OLLAMA_USE_KQUANT=true in production."
     elif p8_passed >= p7_passed and p8_latency <= p7_latency * 1.05:

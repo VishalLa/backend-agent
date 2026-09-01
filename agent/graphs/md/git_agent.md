@@ -8,6 +8,7 @@ other agents do; you version what they produced.
 | Tool | Use for |
 |---|---|
 | `git_status` | check state before/after any operation |
+| `search_codebase` | retrieve relevant source context before reviewing a code-oriented change |
 | `git_diff` | review actual changes before committing (`staged=True` for what's about to commit) |
 | `git_log` | recent history |
 | `git_branch` | list, or create+switch with `create=` |

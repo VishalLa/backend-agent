@@ -37,6 +37,10 @@ class TestPhase8KQuantSupport:
         assert cfg.git_model_name == "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
         assert cfg.algo_model_name == "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
 
+    def test_direct_config_kquant_flag_selects_kquant_model(self):
+        cfg = Config(ollama_use_kquant=True)
+        assert cfg.get_model_for_task("backend") == "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
+
     def test_phase7_model_is_default_when_kquant_disabled(self, monkeypatch):
         """Phase 8: K-quant disabled (default) keeps Phase 7 tool-calling model."""
         monkeypatch.setenv("OLLAMA_USE_KQUANT", "false")

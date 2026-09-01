@@ -37,3 +37,27 @@ def test_build_default_suite_includes_all_agent_modes():
 
     assert {case.agent_key for case in suite} == {"backend", "ml", "git", "algorithms"}
     assert len(suite) == 4
+
+
+def test_harness_runs_cases_and_reports_invocation_failures(monkeypatch):
+    class FakeModel:
+        def invoke(self, _messages):
+            return type("Response", (), {"content": "auth route reset"})()
+
+    class FakeChatModel:
+        def __init__(self, _config):
+            pass
+
+        def get_llm(self):
+            return FakeModel()
+
+    monkeypatch.setattr("agent.eval.ChatModel", FakeChatModel)
+    case = EvalCase(
+        name="backend", agent_key="backend", prompt="test",
+        expected_keywords=("auth", "route", "reset"),
+    )
+
+    result = EvalHarness(Config()).run([case])
+
+    assert result["passed"] == 1
+    assert result["invocation_failures"] == 0

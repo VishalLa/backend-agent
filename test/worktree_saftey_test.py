@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.task_profile import TASK_PROFILES, filter_tools_for_task
+from agent.tools import TOOLS_BY_TASK
 from agent.confirmation import (
     needs_confirmation,
     ALWAYS_CONFIRM_TOOLS,
@@ -209,22 +210,21 @@ class TestTaskProfileIntegration:
 
     def test_filter_tools_for_backend_agent(self):
         """Filter should return tools for backend agent."""
-        result = filter_tools_for_task("backend")
+        result = filter_tools_for_task("backend", TOOLS_BY_TASK["backend"])
         assert isinstance(result, list)
         assert len(result) > 0
 
     def test_filter_tools_for_git_agent(self):
         """Filter should return only git tools for git agent."""
-        result = filter_tools_for_task("git")
+        result = filter_tools_for_task("git", TOOLS_BY_TASK["git"])
         assert isinstance(result, list)
         # Should have git tools
         assert len(result) > 0
 
     def test_filter_invalid_agent_returns_empty(self):
         """Filter should return empty for invalid agent."""
-        result = filter_tools_for_task("invalid_agent")
-        # Should be empty or None
-        assert result is None or (isinstance(result, list) and len(result) == 0)
+        with pytest.raises(ValueError, match="Unknown task profile"):
+            filter_tools_for_task("invalid_agent", TOOLS_BY_TASK["backend"])
 
 
 # ============================================================================

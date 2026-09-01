@@ -1,8 +1,8 @@
 # Local Coding Agent
 
-This repository provides the building blocks for a multi-specialist coding agent. A caller explicitly selects one of four agent modes—backend, ML/AI, Git, or algorithms—and `AgentRunner` invokes the matching LangGraph workflow with a task-specific prompt, model configuration, and allow-listed tools.
+This repository provides the building blocks for a multi-specialist coding agent. A caller can select one of four agent modes—backend, ML/AI, Git, or algorithms—or let `AgentRunner` route a request automatically. It then invokes the matching LangGraph workflow with a task-specific prompt, model configuration, and allow-listed tools.
 
-The repository is primarily a library at present. `main.py` is only a placeholder, so a UI or API must instantiate `Config` and `AgentRunner` to run the agent.
+The repository is primarily a library, with `main.py` also providing an interactive terminal runner.
 
 ## Architecture
 
@@ -33,14 +33,14 @@ Optional integrations enabled from the Streamlit sidebar:
 
 ### Agent execution flow
 
-1. The caller selects an agent key and sends a message to `AgentRunner.run()`.
+1. The caller selects an agent key (or passes `None` for automatic routing) and sends a message to `AgentRunner.run()`.
 2. `AgentRunner` lazily creates the selected agent and gives it only that task's tool set.
 3. `BaseAgent` adds the task's Markdown system prompt, invokes a tool-bound LLM, and records the response in `AgentState`.
 4. If the model requests tools, the graph checks each call for confirmation. Calls requiring approval pause through LangGraph `interrupt()`.
 5. On approval (or when no approval is required), tools run and their outputs are appended to state. The graph returns to the model until it produces a final response, fails, or reaches the iteration limit.
 6. The runner returns the final LangGraph state together with the selected agent key and thread ID. A paused run continues through `resume_confirmation()` using the same thread ID.
 
-The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentRunner` instance alive (for example in Streamlit session state) is therefore necessary to preserve paused confirmations and conversation state.
+The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentRunner` instance alive (for example in Streamlit session state) is therefore necessary to preserve paused confirmations and conversation state. Passing `project_path` pins tool paths to that project; `enable_worktree=True` creates an isolated scratch worktree for each conversation.
 
 ## Project layout
 
@@ -158,21 +158,22 @@ For database storage, set `POSTGRES_URL` (plus optional `POSTGRES_POOL_SIZE` and
 
 ## Implementation Status
 
-All core features and optimizations are now implemented:
-
 ### Core Functionality
 - ✅ **CLI Entry Point** — Interactive agent runner with rich terminal UI
 - ✅ **Agent Router/Dispatcher** — Automatic task classification (backend/ml/git/algorithms)
 - ✅ **Safety Tests** — Comprehensive validation of tool filtering and confirmation gates
-- ✅ **Git Worktree Isolation** — Scratch-branch environment with diff review before merge
-- ✅ **Eval Harness** — Lightweight benchmark for model/config validation
+- ✅ **Git Worktree Isolation** — Optional scratch branches, with review, merge, and discard APIs
+- ✅ **Eval Harness** — Local-model benchmark with per-case accuracy and latency results
 - ✅ **Context Window Management** — Rolling summaries with local model compression
 
 ### Local Ollama Optimization
-- ✅ **Ollama Tuning (Phase 5)** — Environment-driven configuration for keep_alive, flash_attention, KV cache, thread count
+- ✅ **Ollama Tuning (Phase 5)** — Request settings plus `run_ollama.sh --serve` for daemon flash-attention/KV-cache settings
 - ✅ **Tool-Calling Model Default (Phase 6)** — MFDoom/deepseek-coder-v2-tool-calling:16b enforced in local mode
 - ✅ **Prompt Tightening (Phase 7)** — Direct tool-call instructions in agent prompts (no narration)
 - ✅ **K-Quant Upgrade (Phase 8)** — Support for deepseek-coder-v2:16b-lite-instruct-q4_K_M with benchmarking
+
+### Codebase Retrieval
+- ✅ **Phase 10: Local Codebase RAG** — Safe, dependency-free BM25 retrieval with line-cited chunks, automatic freshness checks, and a `search_codebase` tool available to every specialist. Index data is stored outside the repository in the system temporary directory.
 
 ### Testing & Validation
 - ✅ **Router Tests** — 7 tests validating model defaults and task routing
@@ -198,6 +199,9 @@ python3 main.py --agent backend
 
 # Enable K-quant quantization
 OLLAMA_USE_KQUANT=true python3 main.py
+
+# Run a conversation in an isolated Git worktree
+python3 main.py --worktree --project /path/to/repo
 
 # Run full stack with sandbox and persistence
 bash run.sh full

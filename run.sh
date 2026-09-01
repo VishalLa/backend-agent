@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 # Parse CLI arguments
-MODE="${1:-full}"
+MODE="${1:-cli}"
 AGENT="${2:-}"
 
 CMD_SANDBOX="cd '$PROJECT_DIR' && bash sandbox/run.sh"

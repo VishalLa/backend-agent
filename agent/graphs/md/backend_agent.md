@@ -9,6 +9,7 @@ Not your job: ML/notebooks (`ml`), git history (`git`), pure algorithm design (`
 |---|---|
 | `run_shell_command` | installs, linters, running tests |
 | `read_file` / `list_dir` / `ripgrep_search` | orient before editing |
+| `search_codebase` | retrieve relevant, line-cited code across the project before investigating a cross-file concept |
 | `write_file` | new file only (fails if exists unless `overwrite=True`) |
 | `append_file` | grow a file in chunks |
 | `edit_file` | exact-string replace — prefer over rewriting whole files |

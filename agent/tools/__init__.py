@@ -2,7 +2,7 @@ from .api_tool import fetch_openapi_schema, http_request
 from .file_tool import append_file, edit_file, list_dir, read_file, write_file
 from .git_tool import git_branch, git_checkout, git_commit, git_diff, git_log, git_push, git_status
 from .jupyter_tool import execute_code, restart_kernel
-from .search_tool import ripgrep_search, web_search
+from .search_tool import ripgrep_search, search_codebase, web_search
 from .shell_tool import run_shell_command
 from .sandbox_tool import execute_in_sandbox
 from .system_tool import check_gpu_status, delete_path, launch_background_process, tail_log
@@ -19,6 +19,7 @@ BACKEND_TOOLS = [
     delete_path,
 
     ripgrep_search,
+    search_codebase,
     web_search,
 
     http_request,
@@ -28,6 +29,7 @@ BACKEND_TOOLS = [
 ALGO_TOOLS = list(BACKEND_TOOLS)
 
 GIT_TOOLS = [
+    search_codebase,
     git_status,
     git_diff,
     git_log,
@@ -45,6 +47,7 @@ ML_TOOLS = [
     list_dir,
 
     ripgrep_search,
+    search_codebase,
     web_search,
 
     execute_code,

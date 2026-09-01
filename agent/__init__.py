@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -16,6 +17,7 @@ from .graphs.base_graph import BaseAgent
 from .graphs.git_graph import GitAgent
 from .graphs.ml_graph import MLAgent
 from .tools import SANDBOX_TOOLS, TOOLS_BY_TASK
+from .worktree import GitWorktree
 
 if TYPE_CHECKING:
     from .storage import AgentStorage
@@ -38,6 +40,7 @@ class AgentRunResult:
     thread_id: str
     state: Mapping[str, Any]
     database_session_id: Optional[int] = None
+    worktree_path: Optional[str] = None
 
 
 AGENT_OPTIONS: tuple[AgentOption, ...] = (
@@ -134,6 +137,7 @@ class AgentRunner:
         agent_classes: Optional[Mapping[str, type[BaseAgent]]] = None,
         tools_by_task: Optional[Mapping[str, list[Any]]] = None,
         enable_sandbox: bool = False,
+        enable_worktree: bool = False,
         storage: Optional[AgentStorage] = None,
     ) -> None:
         self.config = config
@@ -141,7 +145,10 @@ class AgentRunner:
         self._tools_by_task = dict(tools_by_task or TOOLS_BY_TASK)
         self.dispatcher = TaskRouter(config)
         self.enable_sandbox = enable_sandbox
+        self.enable_worktree = enable_worktree
         self.storage = storage
+        self._worktree_managers: dict[str, GitWorktree] = {}
+        self._worktree_task_ids: dict[str, tuple[str, str]] = {}
         if enable_sandbox:
             self._tools_by_task = {
                 task_key: [*tools, *SANDBOX_TOOLS]
@@ -180,6 +187,72 @@ class AgentRunner:
             raise ValueError("user_message must not be empty")
         return self.dispatcher.route(user_message)
 
+
+    def _project_root_for_run(
+        self,
+        conversation_id: str,
+        project_path: Optional[str],
+    ) -> Optional[str]:
+        """Return the tool root, creating one isolated worktree per thread when enabled."""
+        if not self.enable_worktree:
+            return str(Path(project_path).expanduser().resolve()) if project_path else None
+
+        existing = self._worktree_task_ids.get(conversation_id)
+        if existing is not None:
+            manager_key, task_id = existing
+            return str(self._worktree_managers[manager_key].get_worktree_path(task_id))
+
+        source_root = Path(project_path or Path.cwd()).expanduser().resolve()
+        manager_key = str(source_root)
+        manager = self._worktree_managers.get(manager_key)
+        if manager is None:
+            manager = GitWorktree(source_root)
+            self._worktree_managers[manager_key] = manager
+        task_id = conversation_id
+        worktree_path = manager.create_worktree(task_id)
+        self._worktree_task_ids[conversation_id] = (manager_key, task_id)
+        return str(worktree_path)
+
+
+    def get_worktree_summary(
+        self,
+        thread_id: str
+    ) -> str:
+        manager, task_id = self._worktree_for_thread(thread_id)
+        return manager.get_diff_summary(task_id)
+
+
+    def merge_worktree(
+        self,
+        thread_id: str
+    ) -> str:
+        manager, task_id = self._worktree_for_thread(thread_id)
+        result = manager.merge_worktree(task_id)
+        self._worktree_task_ids.pop(thread_id, None)
+        return result
+
+
+    def discard_worktree(
+        self,
+        thread_id: str
+    ) -> str:
+        manager, task_id = self._worktree_for_thread(thread_id)
+        result = manager.discard_worktree(task_id)
+        self._worktree_task_ids.pop(thread_id, None)
+        return result
+
+
+    def _worktree_for_thread(
+        self,
+        thread_id: str
+    ) -> tuple[GitWorktree, str]:
+        try:
+            manager_key, task_id = self._worktree_task_ids[thread_id]
+        except KeyError as exc:
+            raise ValueError(f"No active worktree for thread '{thread_id}'") from exc
+        return self._worktree_managers[manager_key], task_id
+
+
     def run(
         self,
         agent_key: Optional[str],
@@ -204,6 +277,7 @@ class AgentRunner:
         )
 
         conversation_id = thread_id or uuid.uuid4().hex
+        tool_project_root = self._project_root_for_run(conversation_id, project_path)
         if self.storage is not None:
             self.storage.ensure_session(
                 thread_id=conversation_id,
@@ -215,7 +289,7 @@ class AgentRunner:
 
         state = graph.invoke(
             {"messages": [HumanMessage(content=user_message.strip())]},
-            {"configurable": {"thread_id": conversation_id}},
+            {"configurable": {"thread_id": conversation_id, "project_root": tool_project_root}},
         )
 
         if self.storage is not None:
@@ -226,6 +300,7 @@ class AgentRunner:
             conversation_id,
             state,
             self.storage.session_id_for(conversation_id) if self.storage else None,
+            tool_project_root if self.enable_worktree else None,
         )
 
 
@@ -246,7 +321,10 @@ class AgentRunner:
 
         state = self.get_agent(key).graph.invoke(
             Command(resume=dict(decision)),
-            {"configurable": {"thread_id": thread_id}},
+            {"configurable": {
+                "thread_id": thread_id,
+                "project_root": self._project_root_for_run(thread_id, None),
+            }},
         )
 
         if self.storage is not None:
@@ -257,6 +335,7 @@ class AgentRunner:
             thread_id,
             state,
             self.storage.session_id_for(thread_id) if self.storage else None,
+            self._project_root_for_run(thread_id, None) if self.enable_worktree else None,
         )
 
 

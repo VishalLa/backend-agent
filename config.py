@@ -206,7 +206,17 @@ class Config(BaseModel):
             return self.ollama_model
 
         field_name = profile.get("model_field")
-        return getattr(self, field_name, self.ollama_model)
+        selected = getattr(self, field_name, self.ollama_model)
+        # ``Config(ollama_use_kquant=True)`` should behave the same as
+        # ``Config.from_env()`` while still allowing an explicit per-task
+        # override to win.
+        if (
+            self.provider == "local"
+            and self.ollama_use_kquant
+            and selected == DEFAULT_OLLAMA_MODEL
+        ):
+            return DEFAULT_OLLAMA_KQUANT_MODEL
+        return selected
 
 
     def context_over_budget(self, current_tokens: int) -> bool:

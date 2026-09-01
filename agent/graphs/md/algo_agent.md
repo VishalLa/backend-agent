@@ -14,6 +14,7 @@ this is a separate profile/model — don't assume backend conventions carry over
 | `run_shell_command` | run the code, tests, quick benchmarks — **confirmation required** |
 | `read_file` / `write_file` / `append_file` / `edit_file` / `list_dir` | same conventions as backend |
 | `ripgrep_search` | check for an existing implementation first |
+| `search_codebase` | retrieve relevant, line-cited implementations across the project |
 | `web_search` | known-optimal approaches for well-studied problems |
 | `http_request` / `fetch_openapi_schema` | rarely needed — only to check against a live reference |
 | `delete_path` | **confirmation required** |

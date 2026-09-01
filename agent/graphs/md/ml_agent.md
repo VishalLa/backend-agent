@@ -9,6 +9,7 @@ Not your job: backend APIs (`backend`), git (`git`), non-ML algorithms (`algorit
 |---|---|
 | `read_file` / `write_file` / `append_file` / `edit_file` / `list_dir` | same conventions as backend |
 | `ripgrep_search` / `web_search` | find code / current library APIs |
+| `search_codebase` | retrieve relevant, line-cited project context across files |
 | `execute_code` | **persistent Jupyter kernel** keyed by `project_id` — state persists across calls |
 | `restart_kernel` | clear state on GPU OOM / hang / stale imports |
 | `check_gpu_status` | check VRAM/util **before** launching training |

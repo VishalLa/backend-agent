@@ -96,16 +96,22 @@ def _print_response(result: Any) -> None:
         )
 
 
-def run_cli(project_path: Optional[str] = None, initial_agent: Optional[str] = None) -> None:
+def run_cli(
+    project_path: Optional[str] = None,
+    initial_agent: Optional[str] = None,
+    enable_worktree: bool = False,
+) -> None:
     config = Config.from_env()
-    runner = AgentRunner(config)
+    runner = AgentRunner(config, enable_worktree=enable_worktree)
 
-    agent_key = _select_agent(initial_agent)
+    # No explicit agent means route every new request automatically. Passing
+    # --agent pins the specialist for the complete CLI session.
+    agent_key = initial_agent
     thread_id: Optional[str] = None
 
     header_text = Text()
     header_text.append(f"Coding agent ready (")
-    header_text.append(agent_key, style="bold cyan")
+    header_text.append(agent_key or "automatic routing", style="bold cyan")
     header_text.append("). Type ")
     header_text.append("exit", style="bold yellow")
     header_text.append(" or ")
@@ -151,6 +157,7 @@ def run_cli(project_path: Optional[str] = None, initial_agent: Optional[str] = N
             continue
 
         thread_id = getattr(result, "thread_id", thread_id)
+        active_agent_key = getattr(result, "agent_key", agent_key)
 
         # Drain however many confirmation pauses this turn produces - a
         # single user message can trigger more than one gated tool call in
@@ -160,7 +167,7 @@ def run_cli(project_path: Optional[str] = None, initial_agent: Optional[str] = N
             decision = default_cli_confirmation_handler(pending)
             try:
                 result = runner.resume_confirmation(
-                    agent_key=agent_key,
+                    agent_key=active_agent_key,
                     thread_id=thread_id,
                     decision=confirmation_resume_payload(decision.approved, decision.reason),
                 )
@@ -174,12 +181,13 @@ def run_cli(project_path: Optional[str] = None, initial_agent: Optional[str] = N
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Local coding agent CLI")
-    parser.add_argument("--agent", choices=VALID_AGENTS, default=None, help="Agent mode to use")
+    parser.add_argument("--agent", choices=VALID_AGENTS, default=None, help="Pin one agent mode instead of automatic routing")
     parser.add_argument("--project", default=None, help="Project root the agent should operate in")
+    parser.add_argument("--worktree", action="store_true", help="Run each conversation in an isolated Git worktree")
     args = parser.parse_args()
 
     try:
-        run_cli(project_path=args.project, initial_agent=args.agent)
+        run_cli(project_path=args.project, initial_agent=args.agent, enable_worktree=args.worktree)
     except KeyboardInterrupt:
         print("\nbye")
         sys.exit(0)

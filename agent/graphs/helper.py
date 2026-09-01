@@ -218,6 +218,7 @@ PATH_ARG_NAMES_BY_TOOL: dict[str, tuple[str, ...]] = {
     "list_dir": ("path",),
     "delete_path": ("path",),
     "ripgrep_search": ("path",),
+    "search_codebase": ("path",),
     "run_shell_command": ("cwd",),
     "git_status": ("cwd",),
     "git_diff": ("cwd",),

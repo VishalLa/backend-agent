@@ -10,6 +10,7 @@ TASK_PROFILES = {
             "edit_file",
             "list_dir",
             "ripgrep_search",
+            "search_codebase",
             "web_search",
             "http_request",
             "fetch_openapi_schema",
@@ -27,6 +28,7 @@ TASK_PROFILES = {
             "edit_file",
             "list_dir",
             "ripgrep_search",
+            "search_codebase",
             "web_search",
             "execute_code",
             "restart_kernel",
@@ -41,6 +43,7 @@ TASK_PROFILES = {
         "model_field": "git_model_name",
         "description": "git workflow",
         "tool_names": {
+            "search_codebase",
             "git_status",
             "git_diff",
             "git_log",
@@ -61,6 +64,7 @@ TASK_PROFILES = {
             "edit_file",
             "list_dir",
             "ripgrep_search",
+            "search_codebase",
             "web_search",
             "http_request",
             "fetch_openapi_schema",
@@ -74,7 +78,7 @@ TASK_PROFILES = {
 def filter_tools_for_task(task_mode: str, all_tools: list) -> list:
     profile = TASK_PROFILES.get(task_mode)
     if profile is None:
-        return all_tools
+        raise ValueError(f"Unknown task profile: {task_mode!r}")
     names = profile["tool_names"]
     filtered = [t for t in all_tools if t.name in names]
     if not filtered:
@@ -84,4 +88,3 @@ def filter_tools_for_task(task_mode: str, all_tools: list) -> list:
             "the full, unrestricted toolset."
         )
     return filtered
-    
