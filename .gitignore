@@ -17,4 +17,5 @@ test.*
 .claude
 *.log
 
-/workflow
+/workflow/*
+/workflow/coding-agent-workflow.drawio

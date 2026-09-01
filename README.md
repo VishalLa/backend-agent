@@ -7,29 +7,32 @@ The repository is primarily a library, with `main.py` also providing an interact
 ## Architecture
 
 ```text
-Caller / future Streamlit UI
+CLI / caller / future Streamlit UI
           |
           v
-  Config.from_env() -----> Config (providers, models, safety, limits)
-          |                           |
-          v                           v
-     AgentRunner -----> selected BaseAgent subclass
-          |                    (backend / ml / git / algorithms)
-          |                           |
-          |                           v
-          |                 LangGraph state machine
-          |                 agent -> confirmation -> tools --+
-          |                   ^                                |
-          |                   +--------------------------------+
-          |                           |
-          v                           v
-    AgentRunResult              LLM provider chain + task tools
-                         SambaNova -> OpenRouter -> Groq -> Ollama
+  Config.from_env() -----> AgentRunner
+                                  |
+                  optional router selects a specialist
+                                  |
+                                  v
+                       BaseAgent / LangGraph loop
+                    agent -> confirmation -> tools --+
+                      ^                                |
+                      +--------------------------------+
+                                  |
+                  LLM chain + task-scoped tools
+     local: Ollama | API: SambaNova -> OpenRouter -> Groq -> Ollama
+
+  Optional per-thread Git worktree -> isolated project root for tools
+  search_codebase -> fresh, line-aware local BM25 index in the temp directory
 
 Optional integrations enabled from the Streamlit sidebar:
   database/  -> SQLAlchemy persistence for sessions, messages, tools, and approvals
   sandbox/   -> hardened Docker service for isolated Python/shell execution
 ```
+
+The editable architecture diagram is available at
+[`workflow/coding-agent-workflow.drawio`](workflow/coding-agent-workflow.drawio).
 
 ### Agent execution flow
 
@@ -46,7 +49,7 @@ The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentR
 
 | Path | Responsibility | Connected to |
 | --- | --- | --- |
-| `main.py` | Placeholder executable that prints a greeting. | Not yet connected to the agent runtime. |
+| `main.py` | Rich interactive CLI with automatic routing by default, an optional pinned specialist, and confirmation resume handling. | Creates and keeps one `AgentRunner` for the session; supports `--project` and `--worktree`. |
 | `config.py` | Pydantic configuration: API keys, provider URLs, per-task models, retry/context limits, confirmation policy, PostgreSQL, and Celery settings. `Config.from_env()` loads required provider keys. | Passed to agents, model clients, and persistence queueing. |
 | `agent/__init__.py` | Package entry point and frontend-facing orchestration API. Exports `AgentRunner`, which lists selectable agents, constructs them lazily, starts runs, and resumes confirmation interrupts. | Uses agent graphs and `TOOLS_BY_TASK`. |
 | `agent/graphs/base_graph.py` | Shared LangGraph implementation: prompt loading, LLM calls, retries, context recovery, confirmation gates, tool invocation, logs, routing, and in-memory checkpointing. | Base class for every specialist graph. |
@@ -56,6 +59,9 @@ The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentR
 | `agent/graphs/algo_graph.py` | Algorithms specialization (`TASK_MODE = "algorithms"`), including its `algo_agent.md` prompt override. | Inherits the base workflow and algorithm tools/prompt. |
 | `agent/graphs/md/*.md` | System prompts that constrain each specialist's working style. | Loaded by `BaseAgent` from the agent's task mode. |
 | `agent/graphs/helper.py` | Graph support functions: error classification, retry timing, thread ID lookup, leaked tool-call repair, output trimming, and read-only-loop detection. | Called by `BaseAgent`. |
+| `agent/worktree.py` | Creates one scratch Git worktree and `agent/<thread-id>` branch per conversation. | Used by `AgentRunner` when `enable_worktree=True`; exposes diff, merge, and discard operations. |
+| `agent/codebase_index.py` | Dependency-free, line-aware BM25 index for project files. | Refreshes automatically when files or `.gitignore` change; caches outside the repository. |
+| `agent/eval.py` | Small local-model benchmark suite with keyword-coverage and latency scoring. | Used by `validate.sh` to compare local-model and quantization changes. |
 | `agent/task_profile.py` | Single source of truth mapping task modes to tool names, descriptions, and config model fields. | Filters tools in `BaseAgent`; resolves task model in `Config`. |
 | `agent/llm.py` | Builds cached LangChain chat clients and fallback chains. API mode is SambaNova → OpenRouter → Groq → optional Ollama; local mode uses Ollama only. | Tool-bound model is used by `BaseAgent`. |
 | `agent/context_window.py` | Keeps recent conversation turns and summarizes older history with a local Ollama summary model when the context budget is exceeded. | Used when an LLM call reports a context-length error. |
@@ -98,6 +104,15 @@ The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentR
 - Tool output is bounded before it is returned to the model, older tool results are compressed, and context-overflow recovery attempts a local summary before returning an error.
 - Runtime events are written as JSON lines to `agent_events.log` by default. Logging is best-effort and never interrupts agent execution.
 - The optional Docker sandbox disables network access, uses a read-only root filesystem plus temporary writable paths, drops Linux capabilities, limits memory/CPU/processes, and applies execution timeouts.
+- With `--worktree`, tool paths are redirected to a scratch worktree created for the conversation. Review its diff with `get_worktree_summary()` and explicitly merge or discard it afterwards.
+- `search_codebase` is available to every specialist. It ignores generated, gitignored, virtual-environment, and `.env*` paths before ranking code chunks with line references.
+
+## Recent system improvements
+
+- **Automatic routing:** omit `agent_key` (or run the CLI without `--agent`) to classify each request as backend, ML, Git, or algorithms. Routing falls back to deterministic keywords if the model is unavailable.
+- **Worktree isolation:** use `python3 main.py --worktree --project /path/to/repo` to give a conversation its own `agent/<thread-id>` branch and sibling worktree, then review, merge, or discard the result through `AgentRunner`.
+- **Local evaluation:** `bash validate.sh` runs the deterministic eval suite against the configured local model, reporting per-case keyword coverage and latency.
+- **Codebase retrieval:** all specialists can call `search_codebase` for local BM25 retrieval. The index is refreshed safely and cached in the operating system's temporary directory, never committed into the project.
 
 ## Optional database and sandbox integrations
 
