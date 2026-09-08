@@ -4,21 +4,27 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
-# Parse CLI arguments
-MODE="${1:-cli}"
-AGENT="${2:-}"
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    MODE="$1"
+    shift
+else
+    MODE="cli"
+fi
+
+EXTRA_ARGS=("$@")
 
 CMD_SANDBOX="cd '$PROJECT_DIR' && bash sandbox/run.sh"
 CMD_CELERY="cd '$PROJECT_DIR' && celery -A database.service.celery_app worker --loglevel=info"
+
 CMD_CLI="cd '$PROJECT_DIR' && python3 main.py"
-if [[ -n "$AGENT" ]]; then
-    CMD_CLI="$CMD_CLI --agent $AGENT"
-fi
+for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do
+    CMD_CLI="$CMD_CLI $(printf '%q' "$arg")"
+done
 
 # Print usage
 print_usage() {
     cat << EOF
-Usage: ./run.sh [MODE] [AGENT]
+Usage: ./run.sh [MODE] [main.py args...]
 
 Modes:
   cli           Run agent CLI only (no services) - DEFAULT
@@ -27,18 +33,30 @@ Modes:
   celery-only   Launch only celery worker
   dev           Launch CLI with services in background
 
-Agents (for CLI mode):
-  backend       Flask/FastAPI, business logic, integrations
-  ml            Training, evaluation, data pipelines
-  git           Version control, branches, commits, push
-  algorithms    Correctness- and complexity-sensitive code
-  (if not specified, you'll be prompted to choose)
+Everything after MODE is forwarded straight through to main.py, so all
+of its flags are available here, e.g.:
+  --agent {backend,ml,git,algorithms}  Pin one agent instead of automatic
+                                        routing (omit to let main.py decide
+                                        - interactive prompt or your own
+                                        routing layer)
+  --project DIR                        Project root the agent operates in
+  --worktree                           Run each conversation in an
+                                        isolated Git worktree
 
 Examples:
-  ./run.sh cli backend        # Run CLI with backend agent
-  ./run.sh full               # Full stack with interactive agent selection
-  ./run.sh dev ml              # CLI (ml) + services backgrounded
+  ./run.sh cli --agent backend --project ./myrepo --worktree
+  ./run.sh full
+  ./run.sh dev --project ./myrepo --worktree     # no agent pinned
+  ./run.sh dev --agent ml --project ./myrepo --worktree
 EOF
+}
+
+run_cli_exec() {
+    local args=(python3 main.py)
+    if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+        args+=("${EXTRA_ARGS[@]}")
+    fi
+    exec "${args[@]}"
 }
 
 case "${MODE}" in
@@ -46,7 +64,7 @@ case "${MODE}" in
         echo "=========================================="
         echo " Starting Coding Agent CLI               "
         echo "=========================================="
-        exec python3 main.py ${AGENT:+--agent $AGENT}
+        run_cli_exec
         ;;
     full)
         echo "=========================================="
@@ -84,7 +102,7 @@ case "${MODE}" in
         echo "Sandbox PID: $SANDBOX_PID (logs: /tmp/sandbox.log)"
         echo "Celery PID:  $CELERY_PID (logs: /tmp/celery.log)"
         trap "kill $SANDBOX_PID $CELERY_PID 2>/dev/null || true" EXIT
-        exec python3 main.py ${AGENT:+--agent $AGENT}
+        run_cli_exec
         ;;
     help|--help|-h)
         print_usage

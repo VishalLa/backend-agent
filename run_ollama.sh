@@ -7,16 +7,26 @@ cd "$PROJECT_DIR"
 # Environment variables for Ollama configuration
 export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
 export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-10m}"
-export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-false}"
+export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-true}"
 export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
 export OLLAMA_NUM_THREADS="${OLLAMA_NUM_THREADS:-}"
 export AGENT_PROVIDER="${AGENT_PROVIDER:-local}"
 export AGENT_ENABLE_OLLAMA_FALLBACK="${AGENT_ENABLE_OLLAMA_FALLBACK:-true}"
 export OLLAMA_USE_KQUANT="${OLLAMA_USE_KQUANT:-false}"
 export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
+export OLLAMA_ORIGINS="${OLLAMA_ORIGINS:-*}"
 
 if ! command -v ollama >/dev/null 2>&1; then
     echo "ERROR: ollama is not installed or not on PATH." >&2
+    exit 1
+fi
+
+# Quantized KV cache (anything other than f16) requires flash attention -
+# llama-server crashes on startup otherwise with a not-obvious error.
+if [ "${OLLAMA_KV_CACHE_TYPE}" != "f16" ] && [ "${OLLAMA_FLASH_ATTENTION}" != "true" ]; then
+    echo "ERROR: OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE} requires OLLAMA_FLASH_ATTENTION=true." >&2
+    echo "Either: export OLLAMA_FLASH_ATTENTION=true" >&2
+    echo "    or: export OLLAMA_KV_CACHE_TYPE=f16" >&2
     exit 1
 fi
 
@@ -26,6 +36,7 @@ if [ "${1:-}" = "--serve" ]; then
         OLLAMA_HOST="$OLLAMA_HOST" \
         OLLAMA_FLASH_ATTENTION="$OLLAMA_FLASH_ATTENTION" \
         OLLAMA_KV_CACHE_TYPE="$OLLAMA_KV_CACHE_TYPE" \
+        OLLAMA_ORIGINS="$OLLAMA_ORIGINS" \
         ollama serve
 fi
 
@@ -43,6 +54,7 @@ echo "  kv_cache_type: ${OLLAMA_KV_CACHE_TYPE}"
 echo "  num_threads: ${OLLAMA_NUM_THREADS:-auto}"
 echo "  use_kquant: ${OLLAMA_USE_KQUANT}"
 echo "  server_host: ${OLLAMA_HOST}"
+echo "  origins: ${OLLAMA_ORIGINS}"
 
 echo
 

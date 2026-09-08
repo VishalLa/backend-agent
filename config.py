@@ -15,7 +15,7 @@ DEFAULT_SAMBANOVA_MODAL = "gpt-oss-120b"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 # local
-DEFAULT_OLLAMA_MODEL = "MFDoom/deepseek-coder-v2-tool-calling:16b"
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:14b"
 DEFAULT_OLLAMA_KQUANT_MODEL = "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
 SUMMARY_MODAL = "phi4-mini-reasoning"
 
