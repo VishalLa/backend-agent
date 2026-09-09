@@ -127,8 +127,9 @@ def default_cli_confirmation_handler(
     try:
         answer = Prompt.ask(
             "[bold red]Allow this?[/bold red]",
-            choices=["y", "n"],
+            choices=["yes", "no"],
             default="n",
+            case_sensitive=False
         ).strip().lower()
     except EOFError:
         return ConfirmationDecision(

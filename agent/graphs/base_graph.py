@@ -19,12 +19,13 @@ from langgraph.types import interrupt
 
 from config import Config
 from log.log_event import log_event, safe_args
-from schema.agent_schema import AgentState, ConfirmationRequest, ToolCallLog
+from schema.agent_schema import AgentState, ConfirmationRequest, ToolCallLog, ConfirmationDecision
 
 from ..confirmation import (
     confirmation_request_payload,
     needs_confirmation,
     parse_confirmation_decision,
+    default_cli_confirmation_handler,
 )
 from ..context_window import ContextWindowHandler
 from ..llm import ChatModel
@@ -551,8 +552,25 @@ class BaseAgent(ABC):
                 tool_args=args,
                 call_id=call_id,
             )
+            # Attempt to get a decision via interrupt. If it fails or returns None, fall back to CLI.
             raw_decision = interrupt(confirmation_request_payload(request))
-            decision = parse_confirmation_decision(raw_decision)
+            try:
+                decision = parse_confirmation_decision(raw_decision)
+            except Exception as exc:
+                # Log parsing failure and use CLI fallback for robustness.
+                log_event(
+                    self.config.log_file,
+                    "confirmation_parse_failed",
+                    thread_id=thread_id,
+                    tool_name=name,
+                    call_id=call_id,
+                    error=str(exc),
+                )
+                # Use built‑in CLI handler if possible; otherwise auto‑deny.
+                try:
+                    decision = default_cli_confirmation_handler(request)
+                except Exception:
+                    decision = ConfirmationDecision(approved=False, reason="auto‑denied (fallback error)")
 
             log_event(
                 self.config.log_file,
