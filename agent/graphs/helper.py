@@ -209,6 +209,17 @@ def _project_root() -> Optional[str]:
 class ProjectRootViolation(ValueError):
     """Raised when a tool call's path argument resolves outside project_root."""
 
+PATH_DEFAULTS_TO_LAUNCH_DIR_TOOLS = frozenset({
+    "list_dir",
+    "ripgrep_search",
+    "search_codebase",
+})
+
+
+def _missing_arg_defaults_to_root(tool_name: str, arg_name: str) -> bool:
+    """True if leaving `arg_name` out should mean 'use the project root'."""
+    return arg_name == "cwd" or tool_name in PATH_DEFAULTS_TO_LAUNCH_DIR_TOOLS
+
 
 PATH_ARG_NAMES_BY_TOOL: dict[str, tuple[str, ...]] = {
     "read_file": ("path",),
@@ -241,6 +252,11 @@ def resolve_tool_path_args(
     in, and reject any path (relative-with-'..' or absolute) that resolves
     outside project_root.
 
+    If the model leaves out a `cwd` (or a `path` that defaults to "."), the
+    project root is filled in. Without this, a call with no `cwd` has nothing
+    to check and the tool runs in whatever directory the agent was launched
+    from - which is how a git commit/push can land in the wrong repository.
+
     If project_root is None, args pass through unchanged - this only
     activates once a project root is actually configured for the run.
 
@@ -261,8 +277,14 @@ def resolve_tool_path_args(
 
     for arg_name in arg_names:
         raw = resolved.get(arg_name)
-        if not raw or not isinstance(raw, str):
-            continue  # missing/blank/non-string - let the tool's own validation handle it
+
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            if _missing_arg_defaults_to_root(tool_name, arg_name):
+                resolved[arg_name] = str(root)
+            continue
+
+        if not isinstance(raw, str):
+            continue  # unexpected type - let the tool's own validation handle it
 
         candidate_path = Path(raw)
         candidate = (candidate_path if candidate_path.is_absolute() else root / candidate_path).resolve()
@@ -316,22 +338,96 @@ def _find_json_object(text: str, start_at: int = 0) -> Optional[str]:
     return None
 
 
+REPAIRED_CALL_ID_PREFIX = "repaired-"
+
+_CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*\s*(.*?)\s*```$", re.DOTALL)
+_TOOL_CALL_TAG_RE = re.compile(r"^<tool_call>\s*(.*?)\s*</tool_call>$", re.DOTALL | re.IGNORECASE)
+
+_MAX_SCAN_CHARS = 8_000
+_MAX_SCAN_CANDIDATES = 50
+
+
+def is_repaired_call(tool_call: Optional[dict]) -> bool:
+    """True if this tool call was rebuilt from plain text by
+    _extract_leaked_tool_call rather than made by the model for real."""
+    call_id = (tool_call or {}).get("id")
+    return isinstance(call_id, str) and call_id.startswith(REPAIRED_CALL_ID_PREFIX)
+
+
+def _unwrap_leaked_text(text: str) -> str:
+    """Strip the wrappers models commonly put around a leaked call: a markdown
+    code fence and/or <tool_call> tags. Anything else is left alone."""
+    unwrapped = (text or "").strip()
+    for _ in range(2):
+        for pattern in (_CODE_FENCE_RE, _TOOL_CALL_TAG_RE):
+            match = pattern.match(unwrapped)
+            if match:
+                unwrapped = match.group(1).strip()
+                break
+        else:
+            break
+    return unwrapped
+
+
+def _tool_call_from_object(parsed: object, allowed_names: set[str]) -> Optional[dict]:
+    """Turn a parsed JSON value into a tool-call dict, if it looks like one."""
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name")
+    if not isinstance(name, str) or name not in allowed_names:
+        return None
+
+    args = parsed.get("arguments", parsed.get("args", parsed.get("parameters", {})))
+    if not isinstance(args, dict):
+        args = {}
+    return {
+        "name": name,
+        "args": args,
+        "id": f"{REPAIRED_CALL_ID_PREFIX}{uuid.uuid4().hex[:8]}",
+    }
+
+
 def _extract_leaked_tool_call(
     text: str,
     valid_tool_names: Iterable[str]
 ) -> Optional[dict]:
-    """Repair a tool call the model wrote as raw JSON in its text content
-    instead of an actual tool_call (a "leaked" call), so it can still be
-    executed rather than silently ignored."""
-    if "{" not in text or '"name"' not in text:
+    """Repair a tool call the model wrote as text instead of making a real
+    tool call (a "leaked" call), so it can still run rather than be ignored.
+
+    Only repairs a message that IS the call: a single JSON object, optionally
+    inside a code fence or <tool_call> tags. A call that merely appears inside
+    other text - the model explaining an example, or echoing a tool result or
+    web page - is NOT repaired, because running whatever JSON happens to show
+    up in text would let any file or page the agent reads trigger tool calls.
+    """
+    candidate = _unwrap_leaked_text(text)
+    if not (candidate.startswith("{") and candidate.endswith("}")):
         return None
+
+    try:
+        parsed = json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    return _tool_call_from_object(parsed, set(valid_tool_names))
+
+
+def contains_unrepaired_tool_call(text: str, valid_tool_names: Iterable[str]) -> bool:
+    """True if `text` has a tool-call-shaped JSON object somewhere inside it.
+
+    Used only to log that we saw one and deliberately did not run it, so a
+    model that keeps writing calls as prose is visible in the event log.
+    """
+    text = (text or "")[:_MAX_SCAN_CHARS]
+    if "{" not in text or '"name"' not in text:
+        return False
+
     allowed_names = set(valid_tool_names)
     cursor = 0
-
-    while True:
+    for _ in range(_MAX_SCAN_CANDIDATES):
         blob = _find_json_object(text, cursor)
         if not blob:
-            return None
+            return False
         cursor = text.find("{", cursor) + 1
 
         try:
@@ -339,20 +435,9 @@ def _extract_leaked_tool_call(
         except (json.JSONDecodeError, ValueError):
             continue
 
-        if not isinstance(parsed, dict):
-            continue
-        name = parsed.get("name")
-        if not isinstance(name, str) or name not in allowed_names:
-            continue
-
-        args = parsed.get("arguments", parsed.get("args", parsed.get("parameters", {})))
-        if not isinstance(args, dict):
-            args = {}
-        return {
-            "name": name,
-            "args": args,
-            "id": f"repaired-{uuid.uuid4().hex[:8]}"
-        }
+        if _tool_call_from_object(parsed, allowed_names):
+            return True
+    return False
 
 
 def _truncate(

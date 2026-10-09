@@ -66,14 +66,14 @@ class Config(BaseModel):
     retry_backoff_seconds: float = 2.0
 
     agent_type: str = "backend"
-    provider: str = "api"
+    provider: str = "local"
 
     # i am using local llm for my convension you can update the default model to api provider
     # per-task-type model overrides
-    backend_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
-    ml_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
-    git_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
-    algo_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
+    backend_model_name: str = DEFAULT_OLLAMA_MODEL
+    ml_model_name: str = DEFAULT_OLLAMA_MODEL
+    git_model_name: str = DEFAULT_OLLAMA_MODEL
+    algo_model_name: str = DEFAULT_OLLAMA_MODEL
 
     postgres_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"
     postgres_pool_size: int = 5

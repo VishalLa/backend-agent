@@ -140,15 +140,20 @@ class AgentRunner:
         enable_worktree: bool = False,
         storage: Optional[AgentStorage] = None,
     ) -> None:
+        
         self.config = config
         self._agent_classes = dict(agent_classes or _AGENT_CLASSES)
         self._tools_by_task = dict(tools_by_task or TOOLS_BY_TASK)
+        
         self.dispatcher = TaskRouter(config)
         self.enable_sandbox = enable_sandbox
         self.enable_worktree = enable_worktree
         self.storage = storage
+        
         self._worktree_managers: dict[str, GitWorktree] = {}
         self._worktree_task_ids: dict[str, tuple[str, str]] = {}
+        self._thread_roots: dict[str, Optional[str]] = {}
+        
         if enable_sandbox:
             self._tools_by_task = {
                 task_key: [*tools, *SANDBOX_TOOLS]
@@ -229,6 +234,7 @@ class AgentRunner:
         manager, task_id = self._worktree_for_thread(thread_id)
         result = manager.merge_worktree(task_id)
         self._worktree_task_ids.pop(thread_id, None)
+        self._thread_roots.pop(thread_id, None)
         return result
 
 
@@ -239,6 +245,7 @@ class AgentRunner:
         manager, task_id = self._worktree_for_thread(thread_id)
         result = manager.discard_worktree(task_id)
         self._worktree_task_ids.pop(thread_id, None)
+        self._thread_roots.pop(thread_id, None)
         return result
 
 
@@ -277,7 +284,11 @@ class AgentRunner:
         )
 
         conversation_id = thread_id or uuid.uuid4().hex
-        tool_project_root = self._project_root_for_run(conversation_id, project_path)
+        tool_project_root = (
+            self._project_root_for_run(conversation_id, project_path)
+            or self._thread_roots.get(conversation_id)
+        )
+        self._thread_roots[conversation_id] = tool_project_root
         if self.storage is not None:
             self.storage.ensure_session(
                 thread_id=conversation_id,
@@ -319,11 +330,16 @@ class AgentRunner:
         if self.storage is not None:
             self.storage.record_confirmation_decision(thread_id=thread_id, decision=decision)
 
+        if thread_id in self._thread_roots:
+            tool_project_root = self._thread_roots[thread_id]
+        else:
+            tool_project_root = self._project_root_for_run(thread_id, None)
+
         state = self.get_agent(key).graph.invoke(
             Command(resume=dict(decision)),
             {"configurable": {
                 "thread_id": thread_id,
-                "project_root": self._project_root_for_run(thread_id, None),
+                "project_root": tool_project_root,
             }},
         )
 
@@ -335,7 +351,7 @@ class AgentRunner:
             thread_id,
             state,
             self.storage.session_id_for(thread_id) if self.storage else None,
-            self._project_root_for_run(thread_id, None) if self.enable_worktree else None,
+            tool_project_root if self.enable_worktree else None,
         )
 
 

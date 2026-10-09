@@ -22,6 +22,7 @@ from log.log_event import log_event, safe_args
 from schema.agent_schema import AgentState, ConfirmationRequest, ToolCallLog, ConfirmationDecision
 
 from ..confirmation import (
+    REPAIRED_CALL_REASON,
     confirmation_request_payload,
     needs_confirmation,
     parse_confirmation_decision,
@@ -38,6 +39,8 @@ from .helper import (
     _detect_read_only_stagnation,
     _extract_leaked_tool_call,
     _identify_provider,
+    contains_unrepaired_tool_call,
+    is_repaired_call,
     _last_ai_message_with_tool_calls,
     _prepare_messages_for_model,
     _project_root,
@@ -308,7 +311,18 @@ class BaseAgent(ABC):
                             self.config.log_file,
                             "llm_tool_call_leaked_as_text",
                             thread_id=thread_id,
-                            tool_name=leaked["name"]
+                            tool_name=leaked["name"],
+                            raw=content[:300],
+                        )
+                    elif contains_unrepaired_tool_call(content, self.tools_by_name):
+                        # A call mixed into other text. Not run: it may be an
+                        # example, or text the agent read rather than wrote.
+                        log_event(
+                            self.config.log_file,
+                            "llm_tool_call_leak_not_repaired",
+                            thread_id=thread_id,
+                            reason="call is mixed with other text, so it was not executed",
+                            raw=content[:300],
                         )
 
                 if not has_tool_calls and not content.strip() and empty_retries_left:
@@ -533,8 +547,11 @@ class BaseAgent(ABC):
             call_id = tc["id"]
             name = tc["name"]
             args = tc.get("args") or {}
+            repaired = is_repaired_call(tc)
 
-            if not needs_confirmation(name, args, confirm_all=self.config.confirm_all_tools):
+            if not needs_confirmation(
+                name, args, confirm_all=self.config.confirm_all_tools, repaired=repaired
+            ):
                 kept_calls.append(tc)
                 continue
 
@@ -544,6 +561,7 @@ class BaseAgent(ABC):
                 thread_id=thread_id,
                 tool_name=name,
                 call_id=call_id,
+                repaired=repaired,
                 args=safe_args(args),
             )
 
@@ -551,6 +569,7 @@ class BaseAgent(ABC):
                 tool_name=name,
                 tool_args=args,
                 call_id=call_id,
+                **({"reason": REPAIRED_CALL_REASON} if repaired else {}),
             )
             # Attempt to get a decision via interrupt. If it fails or returns None, fall back to CLI.
             raw_decision = interrupt(confirmation_request_payload(request))

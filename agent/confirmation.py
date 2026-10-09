@@ -24,16 +24,38 @@ CONDITIONAL_CONFIRM_TOOLS = {
     "write_file": lambda args: bool(args.get("overwrite")),
 }
 
+LOCAL_READ_ONLY_TOOLS = frozenset({
+    "read_file",
+    "list_dir",
+    "ripgrep_search",
+    "search_codebase",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "tail_log",
+    "check_gpu_status",
+})
+
+REPAIRED_CALL_REASON = (
+    "The model wrote this tool call as plain text instead of making a real tool "
+    "call, so it needs your approval before it runs."
+)
+
+
 def needs_confirmation(
     tool_name: str,
     tool_args: dict,
-    confirm_all: bool = False
+    confirm_all: bool = False,
+    repaired: bool = False,
 ) -> bool:
     if confirm_all:
         return True
 
     if tool_name in ALWAYS_CONFIRM_TOOLS:
-        return True    
+        return True
+
+    if repaired and tool_name not in LOCAL_READ_ONLY_TOOLS:
+        return True
 
     check = CONDITIONAL_CONFIRM_TOOLS.get(tool_name)
     return bool(check and check(tool_args or {}))
@@ -149,4 +171,3 @@ def default_cli_confirmation_handler(
         approved=False, 
         reason="declined by user"
     )
-    
