@@ -15,10 +15,10 @@ DEFAULT_SAMBANOVA_MODAL = "gpt-oss-120b"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 # local
-# DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:14b"
+# DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
 DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
-DEFAULT_OLLAMA_KQUANT_MODEL = "deepseek-coder-v2:16b-lite-instruct-q4_K_M"
-SUMMARY_MODAL = "phi4-mini-reasoning"
+DEFAULT_OLLAMA_KQUANT_MODEL = "MFDoom/deepseek-coder-v2-tool-calling:16b"
+SUMMARY_MODAL = "phi4-mini-reasoning:latest"
 
 VALID_AGENT_TYPES = ("backend", "ml", "git", "algorithms")
 
@@ -66,14 +66,14 @@ class Config(BaseModel):
     retry_backoff_seconds: float = 2.0
 
     agent_type: str = "backend"
-    provider: str = "local"
+    provider: str = "api"
 
     # i am using local llm for my convension you can update the default model to api provider
     # per-task-type model overrides
-    backend_model_name: str = DEFAULT_OLLAMA_MODEL
-    ml_model_name: str = DEFAULT_OLLAMA_MODEL
-    git_model_name: str = DEFAULT_OLLAMA_MODEL
-    algo_model_name: str = DEFAULT_OLLAMA_MODEL
+    backend_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
+    ml_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
+    git_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
+    algo_model_name: str = DEFAULT_OLLAMA_KQUANT_MODEL
 
     postgres_url: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/data_agent"
     postgres_pool_size: int = 5

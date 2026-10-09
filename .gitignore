@@ -19,3 +19,4 @@ test.*
 
 /workflow/*
 /workflow/coding-agent-workflow.drawio
+/demo
