@@ -13,7 +13,6 @@ from agent.tools import TOOLS_BY_TASK
 from agent.confirmation import (
     needs_confirmation,
     ALWAYS_CONFIRM_TOOLS,
-    CONDITIONAL_CONFIRM_TOOLS,
 )
 
 
@@ -113,14 +112,14 @@ class TestConfirmationLogic:
         )
         assert result is True
 
-    def test_write_file_without_overwrite_no_confirm(self):
-        """write_file without overwrite should NOT require confirmation."""
+    def test_write_file_without_overwrite_requires_confirm(self):
+        """New file creation requires explicit confirmation."""
         result = needs_confirmation(
             "write_file",
             {"filename": "new_file.txt"},
             confirm_all=False
         )
-        assert result is False
+        assert result is True
 
     def test_write_file_with_overwrite_requires_confirm(self):
         """write_file with overwrite=True should require confirmation."""
@@ -153,11 +152,6 @@ class TestConfirmationLogic:
         assert len(ALWAYS_CONFIRM_TOOLS) >= 4
         assert "run_shell_command" in ALWAYS_CONFIRM_TOOLS
         assert "git_push" in ALWAYS_CONFIRM_TOOLS
-
-    def test_conditional_confirm_tools_dict_is_defined(self):
-        """CONDITIONAL_CONFIRM_TOOLS should be properly defined."""
-        assert isinstance(CONDITIONAL_CONFIRM_TOOLS, dict)
-        assert "write_file" in CONDITIONAL_CONFIRM_TOOLS
 
 
 # ============================================================================

@@ -28,4 +28,6 @@ this is a separate profile/model — don't assume backend conventions carry over
 - State the final complexity explicitly (e.g. "O(n log n) time, O(n) space").
 
 ## Confirmation (always, regardless of `confirm_all_tools`)
-`run_shell_command`, `delete_path`, `write_file` with `overwrite=True`.
+`run_shell_command`, `delete_path`, and every file mutation: `write_file`,
+`append_file`, and `edit_file`. Wait for explicit approval before a requested
+change is applied.

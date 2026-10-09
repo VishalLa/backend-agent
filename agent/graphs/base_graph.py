@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from abc import ABC
 from pathlib import Path
@@ -57,6 +58,21 @@ _GENERIC_FALLBACK_SYSTEM_PROMPT = (
     "don't narrate tool use in plain text before invoking it."
 )
 
+_CHANGE_REQUEST_RE = re.compile(
+    r"\b(build|implement|create|add|write|edit|modify|update|fix|refactor|remove|delete)\b",
+    re.IGNORECASE,
+)
+_EXPLANATION_REQUEST_RE = re.compile(
+    r"^\s*(how|what|why|explain|describe|tell me)\b",
+    re.IGNORECASE,
+)
+
+
+def _requests_code_changes(message: str) -> bool:
+    if _EXPLANATION_REQUEST_RE.search(message or ""):
+        return False
+    return bool(_CHANGE_REQUEST_RE.search(message or ""))
+
 
 class BaseAgent(ABC):
     """
@@ -110,6 +126,7 @@ class BaseAgent(ABC):
             "agent_init_started",
             agent_class=type(self).__name__,
             task_mode=self.TASK_MODE,
+            model_name=self.config.get_model_for_task(self.TASK_MODE),
             requested_tool_count=len(tools),
             has_checkpointer=checkpointer is not None,
         )
@@ -260,6 +277,11 @@ class BaseAgent(ABC):
             messages = [SystemMessage(content=self.system_prompt), *messages]
 
         model_input = _prepare_messages_for_model(messages)
+        latest_user_message = next(
+            (message.content for message in reversed(messages) if isinstance(message, HumanMessage)),
+            "",
+        )
+        requires_code_changes = _requests_code_changes(str(latest_user_message))
 
         
         project_root = _project_root()
@@ -288,6 +310,9 @@ class BaseAgent(ABC):
         retries_left = self.config.max_retries
         empty_retries_left = MAX_EMPTY_RESPONSE_RETRIES
         hallucination_retries_left = MAX_TOOL_HALLUCINATION_RETRIES
+        tool_call_format_retries_left = 1
+        tool_call_format_retry_attempted = False
+        tool_call_format_retry_failed = False
         context_compression_retries_left = 1
         last_error: Optional[Exception] = None
 
@@ -314,9 +339,8 @@ class BaseAgent(ABC):
                             tool_name=leaked["name"],
                             raw=content[:300],
                         )
+                        
                     elif contains_unrepaired_tool_call(content, self.tools_by_name):
-                        # A call mixed into other text. Not run: it may be an
-                        # example, or text the agent read rather than wrote.
                         log_event(
                             self.config.log_file,
                             "llm_tool_call_leak_not_repaired",
@@ -324,6 +348,77 @@ class BaseAgent(ABC):
                             reason="call is mixed with other text, so it was not executed",
                             raw=content[:300],
                         )
+                        if tool_call_format_retries_left:
+                            tool_call_format_retries_left -= 1
+                            tool_call_format_retry_attempted = True
+                            log_event(
+                                self.config.log_file,
+                                "llm_tool_call_format_retry",
+                                thread_id=thread_id,
+                                retries_left=tool_call_format_retries_left,
+                            )
+                            model_input.extend([
+                                response,
+                                HumanMessage(content=(
+                                    "Your previous response printed tool-call JSON as text. "
+                                    "That did not run. Do not show or explain tool-call JSON. "
+                                    "Invoke the provided tool directly using its tool interface. "
+                                    "If you need to change a file, call the appropriate file tool "
+                                    "now; the user will be asked to approve the change."
+                                )),
+                            ])
+                            continue
+
+                        tool_call_format_retry_failed = True
+                        response = AIMessage(
+                            content=(
+                                "I could not safely execute the proposed tool call because it "
+                                "was returned as text instead of a tool invocation. No change "
+                                "was made. Please retry with a tool-calling model or a narrower request."
+                            ),
+                            response_metadata=getattr(response, "response_metadata", {}) or {},
+                        )
+                        log_event(
+                            self.config.log_file,
+                            "llm_tool_call_format_retry_exhausted",
+                            thread_id=thread_id,
+                        )
+
+                if (
+                    not has_tool_calls
+                    and requires_code_changes
+                    and not tool_call_format_retry_attempted
+                ):
+                    tool_call_format_retries_left = 0
+                    tool_call_format_retry_attempted = True
+                    log_event(
+                        self.config.log_file,
+                        "llm_missing_tool_call_retry",
+                        thread_id=thread_id,
+                        reason="implementation request received a text-only response",
+                    )
+                    model_input.extend([
+                        response,
+                        HumanMessage(content=(
+                            "This is an implementation request. Your previous text did not "
+                            "change any files. Stop explaining or listing steps and invoke the "
+                            "appropriate provided tool now. Use the actual tool interface, not "
+                            "tool-call JSON in your response. File changes will wait for user approval."
+                        )),
+                    ])
+                    continue
+
+                if tool_call_format_retry_attempted and not has_tool_calls:
+                    tool_call_format_retry_failed = True
+                    response = AIMessage(
+                        content=(
+                            "I could not safely execute the requested work because the model "
+                            "did not issue a valid tool call after retrying. No change was made. "
+                            "Please retry with a tool-calling model or a narrower request."
+                        ),
+                        response_metadata=getattr(response, "response_metadata", {}) or {},
+                    )
+                    content = response.content
 
                 if not has_tool_calls and not content.strip() and empty_retries_left:
                     empty_retries_left -= 1
@@ -354,10 +449,16 @@ class BaseAgent(ABC):
                     tool_call_count=len(getattr(response, "tool_calls", None) or []),
                     duration_ms=int((time.monotonic() - node_started_at) * 1000),
                 )
-                return {
+                result = {
                     "messages": [response],
                     "iterations": state.iterations + 1
                 }
+                if tool_call_format_retry_failed:
+                    result.update({
+                        "status": "error",
+                        "error": "The model did not issue a valid tool call after retrying; no tool was executed.",
+                    })
+                return result
 
             except Exception as exc:
                 last_error = exc

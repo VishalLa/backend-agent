@@ -100,13 +100,13 @@ def write_file(
     content: str,
     overwrite: bool = False
 ) -> str:
-    """Create a new file. Fails if it exists unless overwrite=True (that
-    requires human confirmation). Use edit_file for targeted changes instead.
+    """Create a new file after explicit user confirmation. Fails if it exists
+    unless overwrite=True. Use edit_file for targeted changes instead.
 
     Args:
         path: File path to create.
         content: Full content to write.
-        overwrite: Overwrite existing file (needs confirmation). Default False.
+        overwrite: Overwrite an existing file. Default False.
     """
 
     p = Path(path)
@@ -127,7 +127,8 @@ def append_file(
     content: str,
     create_if_missing: bool = True
 ) -> str:
-    """Append to a file, creating it first if missing (create_if_missing=True).
+    """Append to a file after explicit user confirmation, creating it first if
+    missing (create_if_missing=True).
     Use with write_file to build large files in chunks instead of one big write.
 
     Args:
@@ -162,7 +163,8 @@ def edit_file(
     old_str: str,
     new_str: str
 ) -> str:
-    """Replace an exact, unique string in a file (must match exactly,
+    """Replace an exact, unique string in a file after explicit user
+    confirmation (must match exactly,
     including whitespace, and appear exactly once).
 
     Args:

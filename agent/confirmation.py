@@ -18,10 +18,9 @@ ALWAYS_CONFIRM_TOOLS = {
     "git_push",
     "delete_path",
     "launch_background_process",
-}
-
-CONDITIONAL_CONFIRM_TOOLS = {
-    "write_file": lambda args: bool(args.get("overwrite")),
+    "write_file",
+    "append_file",
+    "edit_file",
 }
 
 LOCAL_READ_ONLY_TOOLS = frozenset({
@@ -57,8 +56,7 @@ def needs_confirmation(
     if repaired and tool_name not in LOCAL_READ_ONLY_TOOLS:
         return True
 
-    check = CONDITIONAL_CONFIRM_TOOLS.get(tool_name)
-    return bool(check and check(tool_args or {}))
+    return False
 
 
 def confirmation_request_payload(request: ConfirmationRequest) -> dict[str, Any]:
@@ -150,7 +148,7 @@ def default_cli_confirmation_handler(
         answer = Prompt.ask(
             "[bold red]Allow this?[/bold red]",
             choices=["yes", "no"],
-            default="n",
+            # default="n",
             case_sensitive=False
         ).strip().lower()
     except EOFError:
@@ -163,7 +161,7 @@ def default_cli_confirmation_handler(
             approved=False,
             reason="cancelled by user (Ctrl-C)"
         )
-    if answer in ("y", "yes"):
+    if answer in ("y", "yes", 1):
         console.print("[green]✓ Approved[/green]")
         return ConfirmationDecision(approved=True)
     console.print("[red]✗ Denied[/red]")

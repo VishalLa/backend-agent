@@ -26,4 +26,6 @@ Not your job: backend APIs (`backend`), git (`git`), non-ML algorithms (`algorit
 - Report actual numbers from tool output, not approximations from memory.
 
 ## Confirmation (always, regardless of `confirm_all_tools`)
-`delete_path`, `launch_background_process`.
+`delete_path`, `launch_background_process`, and every file mutation:
+`write_file`, `append_file`, and `edit_file`. Wait for explicit approval before
+a requested change is applied.

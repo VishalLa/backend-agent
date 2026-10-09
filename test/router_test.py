@@ -18,17 +18,45 @@ class TestLocalDefaultConfig:
 
 
 class TestDispatcher:
-    def test_route_task_maps_backend_requests(self):
+    def test_implementation_and_commit_request_routes_to_backend_without_model(self):
+        runner = AgentRunner(Config())
+        prompt = (
+            "The test suite is failing. Find the root cause and fix it, then add a "
+            "DELETE /tasks/{task_id} endpoint, add success and 404 tests, run the "
+            "full test suite, and commit the changes."
+        )
+
+        with patch.object(runner.dispatcher, "_classify_with_model") as classify:
+            assert runner.route_task(prompt) == "backend"
+            classify.assert_not_called()
+
+    def test_git_only_request_routes_to_git_without_model(self):
         runner = AgentRunner(Config())
 
-        with patch.object(runner.dispatcher, "_classify_with_model", return_value="backend"):
-            assert runner.route_task("fix the auth endpoint and add a test") == "backend"
+        with patch.object(runner.dispatcher, "_classify_with_model") as classify:
+            assert runner.route_task("Create a release branch and push it to origin") == "git"
+            classify.assert_not_called()
 
-    def test_route_task_maps_git_requests(self):
+    def test_ml_request_routes_to_ml_without_model(self):
         runner = AgentRunner(Config())
 
-        with patch.object(runner.dispatcher, "_classify_with_model", return_value="git"):
-            assert runner.route_task("prepare the release and commit the patch") == "git"
+        with patch.object(runner.dispatcher, "_classify_with_model") as classify:
+            assert runner.route_task("Train a PyTorch model on this dataset") == "ml"
+            classify.assert_not_called()
+
+    def test_algorithm_request_routes_to_algorithms_without_model(self):
+        runner = AgentRunner(Config())
+
+        with patch.object(runner.dispatcher, "_classify_with_model") as classify:
+            assert runner.route_task("Analyze binary search complexity") == "algorithms"
+            classify.assert_not_called()
+
+    def test_ambiguous_request_uses_model_classifier(self):
+        runner = AgentRunner(Config())
+
+        with patch.object(runner.dispatcher, "_classify_with_model", return_value="ml") as classify:
+            assert runner.route_task("Which approach should I use here?") == "ml"
+            classify.assert_called_once()
 
     def test_phase_5_ollama_tuning_vars_load_from_environment(self, monkeypatch):
         monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "5m")

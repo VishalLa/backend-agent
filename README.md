@@ -98,9 +98,9 @@ The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentR
 
 ## Safety and resilience
 
-- The agent always requires confirmation for shell commands, Git pushes, path deletion, and launching background processes. Overwriting a file also requires confirmation. Set `AGENT_CONFIRM_ALL_TOOLS=true` to approve every tool call explicitly.
+- The agent always requires confirmation for shell commands, Git pushes, path deletion, launching background processes, and file mutations (`write_file`, `append_file`, and `edit_file`). Read-only file and search tools do not require confirmation. Set `AGENT_CONFIRM_ALL_TOOLS=true` to require confirmation for every tool call.
 - Confirmation is non-blocking at the graph level: LangGraph interrupts and returns a request payload instead of calling `input()` inside the agent loop.
-- Model calls have retry handling for transient errors, rate limits, and local model cold starts. The agent also repairs certain tool calls emitted as plain JSON text.
+- Local mode defaults to the configured tool-calling Ollama model. For implementation requests, a text-only plan triggers one retry that explicitly requires a real tool call; printed tool-call JSON also gets one retry. If the model still cannot issue a real tool call, the run ends with an explicit error instead of implying the change happened.
 - Tool output is bounded before it is returned to the model, older tool results are compressed, and context-overflow recovery attempts a local summary before returning an error.
 - Runtime events are written as JSON lines to `agent_events.log` by default. Logging is best-effort and never interrupts agent execution.
 - The optional Docker sandbox disables network access, uses a read-only root filesystem plus temporary writable paths, drops Linux capabilities, limits memory/CPU/processes, and applies execution timeouts.
@@ -109,7 +109,7 @@ The compiled graphs use an in-memory LangGraph checkpointer. Keeping one `AgentR
 
 ## Recent system improvements
 
-- **Automatic routing:** omit `agent_key` (or run the CLI without `--agent`) to classify each request as backend, ML, Git, or algorithms. Routing falls back to deterministic keywords if the model is unavailable.
+- **Automatic routing:** omit `agent_key` (or run the CLI without `--agent`) to classify each request as backend, ML, Git, or algorithms. Strong task-specific keyword signals take precedence over model routing; ambiguous requests are sent to the classifier, with deterministic keyword scoring as its fallback. A request to commit implementation work is routed to the implementation specialist rather than Git.
 - **Worktree isolation:** use `python3 main.py --worktree --project /path/to/repo` to give a conversation its own `agent/<thread-id>` branch and sibling worktree, then review, merge, or discard the result through `AgentRunner`.
 - **Local evaluation:** `bash validate.sh` runs the deterministic eval suite against the configured local model, reporting per-case keyword coverage and latency.
 - **Codebase retrieval:** all specialists can call `search_codebase` for local BM25 retrieval. The index is refreshed safely and cached in the operating system's temporary directory, never committed into the project.

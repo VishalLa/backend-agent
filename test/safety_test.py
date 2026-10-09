@@ -14,7 +14,6 @@ from agent.task_profile import TASK_PROFILES, filter_tools_for_task
 from agent.confirmation import (
     needs_confirmation,
     ALWAYS_CONFIRM_TOOLS,
-    CONDITIONAL_CONFIRM_TOOLS,
 )
 
 
@@ -186,13 +185,13 @@ class TestConfirmationLogic:
             confirm_all=False
         )
 
-    def test_write_file_without_overwrite_needs_no_confirmation(self):
-        """Writing a new file (no overwrite) should not require confirmation."""
+    def test_write_file_without_overwrite_requires_confirmation(self):
+        """Creating a new file requires explicit approval."""
         result = needs_confirmation("write_file", {"path": "/tmp/new_file.txt"}, confirm_all=False)
-        assert not result, "New file write should not require confirmation"
+        assert result, "New file write should require confirmation"
         
         result = needs_confirmation("write_file", {"overwrite": False}, confirm_all=False)
-        assert not result, "Explicit overwrite=False should not require confirmation"
+        assert result, "write_file should require confirmation regardless of overwrite"
 
     def test_write_file_with_overwrite_needs_confirmation(self):
         """Overwriting an existing file requires confirmation."""
@@ -203,19 +202,9 @@ class TestConfirmationLogic:
         )
         assert result, "File overwrite should require confirmation"
 
-    def test_write_file_overwrite_edge_cases(self):
-        """Edge cases for write_file overwrite detection."""
-        # overwrite key present but falsy
-        assert not needs_confirmation("write_file", {"overwrite": False}, confirm_all=False)
-        
-        # overwrite key present and truthy
-        assert needs_confirmation("write_file", {"overwrite": True}, confirm_all=False)
-        
-        # overwrite key missing
-        assert not needs_confirmation("write_file", {"path": "/tmp/file"}, confirm_all=False)
-        
-        # overwrite with empty string (falsy)
-        assert not needs_confirmation("write_file", {"overwrite": ""}, confirm_all=False)
+    @pytest.mark.parametrize("tool_name", ["append_file", "edit_file"])
+    def test_file_mutation_requires_confirmation(self, tool_name):
+        assert needs_confirmation(tool_name, {"path": "/tmp/file"}, confirm_all=False)
 
     def test_safe_operations_do_not_require_confirmation(self):
         """Read-only operations should never require confirmation."""
@@ -248,23 +237,20 @@ class TestConfirmationLogic:
     def test_always_confirm_tools_is_complete(self):
         """Verify ALWAYS_CONFIRM_TOOLS includes all documented dangerous operations.
         
-        From README: "The agent always requires confirmation for shell commands, 
-        Git pushes, path deletion, and launching background processes."
+        File mutations also require approval so requested changes are applied
+        only after the user reviews the operation.
         """
         expected = {
             "run_shell_command",  # shell commands
             "git_push",            # git pushes
             "delete_path",         # path deletion
             "launch_background_process",  # background processes
+            "write_file",
+            "append_file",
+            "edit_file",
         }
         assert ALWAYS_CONFIRM_TOOLS == expected, (
             f"ALWAYS_CONFIRM_TOOLS incomplete. Expected {expected}, got {ALWAYS_CONFIRM_TOOLS}"
-        )
-
-    def test_conditional_confirm_tools_includes_overwrite(self):
-        """Verify CONDITIONAL_CONFIRM_TOOLS includes file overwrite check."""
-        assert "write_file" in CONDITIONAL_CONFIRM_TOOLS, (
-            "write_file should be in CONDITIONAL_CONFIRM_TOOLS"
         )
 
 
@@ -411,16 +397,14 @@ class TestSafetyDocumentation:
 
     def test_dangerous_operations_documented(self):
         """Verify all dangerous operations mentioned in README are in confirmation lists."""
-        # From README: "The agent always requires confirmation for shell commands, 
-        # Git pushes, path deletion, and launching background processes. 
-        # Overwriting a file also requires confirmation."
+        # From README: file mutations and privileged operations require confirmation.
         
         documented_dangerous = {
             "shell commands",  # run_shell_command
             "Git pushes",       # git_push
             "path deletion",    # delete_path
             "launching background processes",  # launch_background_process
-            "file overwrite",   # write_file with overwrite=True
+            "file mutations",   # write_file, append_file, edit_file
         }
         
         # Verify we have confirmation logic for all of these
@@ -428,7 +412,7 @@ class TestSafetyDocumentation:
         assert "git_push" in ALWAYS_CONFIRM_TOOLS
         assert "delete_path" in ALWAYS_CONFIRM_TOOLS
         assert "launch_background_process" in ALWAYS_CONFIRM_TOOLS
-        assert "write_file" in CONDITIONAL_CONFIRM_TOOLS
+        assert {"write_file", "append_file", "edit_file"}.issubset(ALWAYS_CONFIRM_TOOLS)
 
     def test_git_agent_safety_boundary(self):
         """Git agent should not be able to execute code or run shell commands."""
